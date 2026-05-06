@@ -1,14 +1,11 @@
 """
-MetricAtom 2D 训练脚本 — 最小可行验证。
+MetricAtom 2D 训练脚本 — 128x128 完整验证。
 
-目标：在合成 2D 几何形状上验证度量驱动聚类假设。
+目标：验证度量驱动聚类假设。
 """
 
 import torch
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from pathlib import Path
 
 from src.geometry.metric_field import MetricField2D
@@ -20,56 +17,59 @@ from src.losses.metric_regularizer import metric_smoothness_loss
 from src.losses.occupancy_coupling import occupancy_coupling_loss
 from src.losses.coherence import coherence_loss
 from src.data.synthetic_2d import generate_multi_view, get_occupancy
+from src.visualization.plot_metric import (
+    plot_render_comparison, plot_atom_distribution, plot_metric_field,
+    plot_feature_similarity, plot_loss_curves, generate_evaluation_report
+)
+from src.visualization.plot_atoms import plot_atom_scatter
 
 
-def create_atoms(num_atoms, scene_size, device, seed=42):
-    """
-    在场景中随机初始化原子。
-    原子位置偏向物体可能出现的位置：中心区域 (0.25, 0.25) 到 (0.75, 0.75)。
-    """
+def create_atoms(num_atoms, device, seed=42):
+    """网格初始化原子，确保覆盖整个场景"""
     torch.manual_seed(seed)
     atoms = []
-    for _ in range(num_atoms):
-        mu = torch.rand(2, device=device) * 0.5 + 0.25  # [0.25, 0.75]
-        radius = 0.05 + torch.rand(1, device=device).item() * 0.1  # [0.05, 0.15]
-        color = torch.rand(3, device=device)  # [0, 1]
-        atom = Atom2D(mu, radius=radius, color=color, feature_dim=16, eps=0.5)
-        atoms.append(atom)
+    
+    # 使用粗略的网格布局 + 小随机扰动
+    grid_size = int(np.ceil(np.sqrt(num_atoms)))
+    for i in range(grid_size):
+        for j in range(grid_size):
+            if len(atoms) >= num_atoms:
+                break
+            u = (i + 0.5) / grid_size + torch.randn(1).item() * 0.03
+            v = (j + 0.5) / grid_size + torch.randn(1).item() * 0.03
+            u = np.clip(u, 0.1, 0.9)
+            v = np.clip(v, 0.1, 0.9)
+            mu = torch.tensor([u, v], device=device, dtype=torch.float32)
+            radius = 0.08 + torch.rand(1, device=device, dtype=torch.float32).item() * 0.07
+            color = torch.rand(3, device=device, dtype=torch.float32)
+            atom = Atom2D(mu, radius=radius, color=color, feature_dim=16, eps=0.5)
+            atoms.append(atom)
+        if len(atoms) >= num_atoms:
+            break
+    
     return atoms
 
 
-def train_scene(H=128, W=128, num_atoms=100, num_epochs=300, num_views=4,
-                lr=1e-3, device='cpu', output_dir='outputs'):
-    """
-    在单个合成场景上训练。
-    
-    Args:
-        H, W: 图像分辨率
-        num_atoms: 原子数量
-        num_epochs: 训练步数
-        num_views: 多视角数量
-        lr: 学习率
-        device: 计算设备
-        output_dir: 输出目录
-    """
+def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
+                phase2_start=800, lr=5e-4, device='cpu', output_dir='outputs/2d_full'):
+    """完整训练流程"""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    print(f"[1/5] 生成合成数据...")
+    scene_size = 1.0
+    
+    print(f"[1/5] 生成合成数据 ({H}x{W}, {num_views} 视角)...")
     images_np, masks_np, transforms = generate_multi_view(
         H=H, W=W, num_objects=2, num_views=num_views, seed=42
     )
-    images = torch.from_numpy(images_np).float().to(device)  # (V, H, W, 3)
-    masks = torch.from_numpy(masks_np).float().to(device)    # (V, H, W, K)
-    occupancy = torch.from_numpy(get_occupancy(masks_np)).float().to(device)  # (H, W)
+    images = torch.from_numpy(images_np).float().to(device)
+    masks = torch.from_numpy(masks_np).float().to(device)
+    occupancy = torch.from_numpy(get_occupancy(masks_np)).float().to(device)
     
-    scene_size = 1.0
-    
-    print(f"[2/5] 初始化度量场和原子...")
+    print(f"[2/5] 初始化度量场 ({H}x{W}) + {num_atoms} 个原子...")
     metric_field = MetricField2D(H, W, init_scale=1.0).to(device)
-    atoms = create_atoms(num_atoms, scene_size, device, seed=42)
+    atoms = create_atoms(num_atoms, device, seed=42)
     
-    # 收集所有可优化参数
     all_params = list(metric_field.parameters())
     for atom in atoms:
         all_params.extend(atom.parameters())
@@ -77,48 +77,42 @@ def train_scene(H=128, W=128, num_atoms=100, num_epochs=300, num_views=4,
     optimizer = torch.optim.Adam(all_params, lr=lr)
     
     print(f"[3/5] 预计算光线...")
-    # 使用正交投影光线（所有像素共享相同方向）
     rays_o, rays_d = RaySampler2D.generate_rays_orthographic(
         H, W, scene_size=scene_size, device=device
     )
     
-    # 损失权重
-    w_met = 0.01   # 度量平滑
-    w_vol = 0.1    # 占位耦合
-    w_coh = 1.0    # 凝聚（已归一化，需要较大的权重平衡）
+    w_met = 0.01
+    w_vol = 0.1
+    w_coh = 1.0
     
-    print(f"[4/5] 开始训练 ({num_epochs} epochs)...")
     losses_log = []
     
+    print(f"[4/5] 开始训练 ({num_epochs} epochs, Phase 2 @ epoch {phase2_start})...")
+    
     for epoch in range(num_epochs):
-        # 随机选择一帧
         frame_idx = epoch % num_views
-        target_img = images[frame_idx].reshape(-1, 3)  # (H*W, 3)
+        target_img = images[frame_idx].reshape(-1, 3)
         
-        # 体积渲染
         pred_color, pred_depth, pred_alpha = volume_render_2d(
             rays_o, rays_d, atoms, metric_field,
-            num_samples=64, near=0.0, far=scene_size,
-            scene_size=scene_size
+            num_samples=48, near=0.0, far=scene_size, scene_size=scene_size
         )
         
-        # 计算各项损失
         loss_render = l1_loss(pred_color, target_img)
         loss_met = metric_smoothness_loss(metric_field) * w_met
         loss_vol = occupancy_coupling_loss(metric_field, occupancy,
                                            g_occ_target=1.0, g_bg_target=10.0) * w_vol
-        
         loss = loss_render + loss_met + loss_vol
         
-        # Phase 2: 加入凝聚损失
-        coh_running = torch.tensor(0.0, device=device)
-        if epoch >= num_epochs // 2:
+        coh_val = 0.0
+        if epoch >= phase2_start:
             loss_coh = coherence_loss(atoms, metric_field) * w_coh
-            coh_running = loss_coh.detach()
+            coh_val = loss_coh.item()
             loss += loss_coh
         
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(all_params, 1.0)  # 梯度裁剪
         optimizer.step()
         
         losses_log.append({
@@ -127,138 +121,60 @@ def train_scene(H=128, W=128, num_atoms=100, num_epochs=300, num_views=4,
             'render': loss_render.item(),
             'met': loss_met.item(),
             'vol': loss_vol.item(),
-            'coh': coh_running.item() if isinstance(coh_running, torch.Tensor) else coh_running,
+            'coh': coh_val,
         })
         
-        if epoch % 100 == 0 or epoch == num_epochs - 1:
-            loss_dict = losses_log[-1]
-            phase = "2" if epoch >= num_epochs // 2 else "1"
-            print(f"Epoch {epoch:4d} [{phase}]: "
-                  f"T={loss_dict['total']:.4f} | "
-                  f"R={loss_dict['render']:.4f} | "
-                  f"M={loss_dict['met']:.4f} | "
-                  f"V={loss_dict['vol']:.4f} | "
-                  f"C={loss_dict['coh']:.4f}")
+        # 日志和可视化
+        if epoch % 200 == 0 or epoch == num_epochs - 1:
+            log = losses_log[-1]
+            phase = "2" if epoch >= phase2_start else "1"
+            print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
+                  f"T={log['total']:7.3f} R={log['render']:.3f} "
+                  f"M={log['met']:.3f} V={log['vol']:.3f} C={log['coh']:.3f}")
             
-            # 保存渲染对比图
-            save_render_comparison(pred_color, target_img, H, W, epoch, output_path)
-            
-            # 保存度量场可视化
-            save_metric_visualization(metric_field, H, W, epoch, output_path)
-            
-            # 保存原子分布
-            save_atom_distribution(atoms, H, W, epoch, output_path)
+            if epoch <= 600 or epoch % 200 == 0:  # 减频可视化
+                plot_render_comparison(pred_color, target_img, H, W, epoch, output_path)
+                plot_metric_field(metric_field, H, W, epoch, output_path)
+                plot_atom_scatter(atoms, H, W, epoch, output_path)
+        
+        if epoch % 400 == 0 and epoch > 0:
+            plot_atom_distribution(atoms, H, W, epoch, output_path)
+            if epoch >= phase2_start:
+                plot_feature_similarity(atoms, epoch, output_path)
     
-    print(f"[5/5] 训练完成。结果保存在 {output_path}/")
+    print(f"[5/5] 训练完成。保存模型并评估...")
+    
+    # 保存模型状态
+    torch.save({
+        'metric_field': metric_field.state_dict(),
+        'atoms': [atom.state_dict() for atom in atoms],
+        'losses_log': losses_log,
+    }, output_path / 'checkpoint.pt')
     
     # 保存训练曲线
-    save_loss_curves(losses_log, output_path, num_epochs)
+    plot_loss_curves(losses_log, output_path, phase2_start)
     
-    return atoms, metric_field, losses_log
-
-
-def save_render_comparison(pred_color, target_img, H, W, epoch, output_path):
-    """保存渲染对比图"""
-    pred_img = pred_color.detach().cpu().reshape(H, W, 3).clamp(0, 1).numpy()
-    target = target_img.detach().cpu().reshape(H, W, 3).numpy()
+    # 生成完整评估报告
+    metrics = generate_evaluation_report(
+        atoms, metric_field, images_np, masks_np, losses_log,
+        H, W, phase2_start, output_path / 'final'
+    )
     
-    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-    axes[0].imshow(pred_img)
-    axes[0].set_title('Rendered')
-    axes[0].axis('off')
-    axes[1].imshow(target)
-    axes[1].set_title('Ground Truth')
-    axes[1].axis('off')
-    plt.tight_layout()
-    plt.savefig(output_path / f'render_{epoch:04d}.png', dpi=80)
-    plt.close(fig)
-
-
-def save_metric_visualization(metric_field, H, W, epoch, output_path):
-    """保存度量场迹的可视化（仅热力图，快速模式）"""
-    trace = metric_field.trace().detach().cpu().numpy()  # (H, W)
-    
-    fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-    im = ax.imshow(trace, cmap='inferno')
-    ax.set_title(f'Metric Trace tr(g) (epoch {epoch})')
-    ax.axis('off')
-    plt.colorbar(im, ax=ax, fraction=0.046)
-    plt.tight_layout()
-    plt.savefig(output_path / f'metric_{epoch:04d}.png', dpi=80)
-    plt.close(fig)
-
-
-def save_atom_distribution(atoms, H, W, epoch, output_path):
-    """保存原子分布图"""
-    fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-    
-    for atom in atoms:
-        mu = atom.position.detach().cpu().numpy()
-        r = atom.radius.detach().cpu().item()
-        color = atom._color.detach().cpu().numpy().clip(0.0, 1.0)
-        eps = atom.existence_prob.detach().cpu().item()
-        
-        # 映射到图像坐标
-        x = mu[0] * W
-        y = mu[1] * H
-        
-        # 计算像素半径
-        pixel_radius = max(r * W, 0.5)
-        
-        circle = plt.Circle((x, y), pixel_radius,
-                             facecolor=color, alpha=min(eps, 0.8),
-                             edgecolor='white', linewidth=0.5)
-        ax.add_patch(circle)
-    
-    ax.set_xlim(0, W)
-    ax.set_ylim(H, 0)
-    ax.set_title(f'Atoms (epoch {epoch})')
-    ax.set_aspect('equal')
-    ax.axis('off')
-    
-    plt.tight_layout()
-    plt.savefig(output_path / f'atoms_{epoch:04d}.png', dpi=80)
-    plt.close(fig)
-
-
-def save_loss_curves(losses_log, output_path, num_epochs):
-    """保存训练曲线"""
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    
-    epochs = [d['epoch'] for d in losses_log]
-    
-    axes[0, 0].plot(epochs, [d['total'] for d in losses_log])
-    axes[0, 0].set_title('Total Loss')
-    axes[0, 0].axvline(x=num_epochs // 2, color='red', linestyle='--', label='Phase 2 start')
-    axes[0, 0].legend()
-    
-    axes[0, 1].plot(epochs, [d['render'] for d in losses_log])
-    axes[0, 1].set_title('Render Loss (L1)')
-    
-    axes[1, 0].plot(epochs, [d['met'] for d in losses_log])
-    axes[1, 0].set_title('Metric Smoothness')
-    
-    axes[1, 1].plot(epochs, [d['coh'] for d in losses_log])
-    axes[1, 1].set_title('Coherence Loss')
-    axes[1, 1].axvline(x=num_epochs // 2, color='red', linestyle='--')
-    
-    plt.tight_layout()
-    plt.savefig(output_path / 'loss_curves.png', dpi=100)
-    plt.close(fig)
+    return atoms, metric_field, losses_log, metrics
 
 
 if __name__ == '__main__':
-    import sys
+    torch.set_default_dtype(torch.float32)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
+    print(f"Device: {device}")
     
-    # 快速测试：小分辨率，少量 epoch
-    atoms, metric_field, log = train_scene(
+    atoms, field, log, metrics = train_scene(
         H=64, W=64,
-        num_atoms=50,
+        num_atoms=80,
         num_epochs=300,
-        num_views=4,
+        num_views=6,
+        phase2_start=150,
         lr=5e-3,
         device=device,
-        output_dir='outputs/2d_test'
+        output_dir='outputs/2d_final'
     )
