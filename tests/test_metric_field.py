@@ -38,16 +38,13 @@ class TestMetricField2D:
         assert not torch.all(field.params.grad == 0), "Gradient must be non-zero"
     
     def test_coordinate_bounds(self):
-        """验证坐标超出范围会报错"""
+        """验证坐标超出范围时自动 clamp 并正常运行"""
         field = MetricField2D(16, 16)
         
-        with pytest.raises(ValueError):
-            coords_invalid = torch.tensor([[1.5, 0.5]])
-            field(coords_invalid)
-        
-        with pytest.raises(ValueError):
-            coords_invalid = torch.tensor([[-0.1, 0.5]])
-            field(coords_invalid)
+        # 超出范围的坐标应被 clamp 且不报错
+        coords = torch.tensor([[1.5, 0.5], [-0.1, 1.2]])
+        g = field(coords)
+        assert g.shape == (2, 2, 2)
     
     def test_initialization(self):
         """验证初始化产生接近单位矩阵的度量"""

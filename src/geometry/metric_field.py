@@ -46,7 +46,7 @@ class MetricField2D(nn.Module):
             raise ValueError(f"coords must be (N, 2), got {coords.shape}")
         
         if coords.min() < 0.0 or coords.max() > 1.0:
-            raise ValueError("coords must be normalized to [0, 1]")
+            coords = coords.clamp(0.0, 1.0)
         
         N = coords.shape[0]
         

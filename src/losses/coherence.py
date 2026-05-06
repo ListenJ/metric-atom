@@ -56,7 +56,10 @@ def coherence_loss(atoms, metric_field, feature_sigma=1.0, repulsion_weight=0.01
     
     # 凝聚密度：C = sum(eps_i * eps_j * K_ij * adj_ij)
     eps_mat = eps_vals.unsqueeze(0) * eps_vals.unsqueeze(1)  # (N, N)
-    C = (eps_mat * K * soft_adj).sum()
+    C_raw = (eps_mat * K * soft_adj).sum()
+    
+    # 归一化：除以最大可能的原子对数量
+    C = C_raw / (N * (N - 1) / 2 + 1.0)
     
     # 损失 = -吸引 + 排斥
     # 吸引项：鼓励高凝聚
