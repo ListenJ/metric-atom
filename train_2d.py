@@ -142,6 +142,8 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
     w_met = 0.01
     w_vol = 0.1
     w_coh = 1.0
+    w_sparse_pre = 0.02
+    w_sparse_post = 0.5
     
     losses_log = []
     
@@ -160,7 +162,9 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
         loss_met = metric_smoothness_loss(metric_field) * w_met
         loss_vol = occupancy_coupling_loss(metric_field, occupancy,
                                            g_occ_target=1.0, g_bg_target=10.0) * w_vol
-        loss = loss_render + loss_met + loss_vol
+        w_s = w_sparse_post if epoch >= phase2_start else w_sparse_pre
+        loss_sparse = torch.stack([a.existence_prob for a in atoms]).mean() * w_s
+        loss = loss_render + loss_met + loss_vol + loss_sparse
         
         coh_val = 0.0
         if epoch >= phase2_start:
@@ -174,12 +178,13 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
         optimizer.step()
         
         if epoch > 0 and epoch % 100 == 0:
-            atoms = prune_atoms(atoms, threshold=0.05)
+            if epoch >= phase2_start:
+                atoms = prune_atoms(atoms, threshold=0.25)
             
-            if epoch >= 100 and epoch <= 500:
+            if epoch >= 50 and epoch <= 350:
                 atoms = seed_atoms_by_error(
                     atoms, pred_color, target_img, H, W, device,
-                    num_seeds=6, radius_min=0.08, radius_max=0.14
+                    num_seeds=6, radius_min=0.05, radius_max=0.10
                 )
             
             new_params = []
@@ -200,25 +205,24 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
             'met': loss_met.item(),
             'vol': loss_vol.item(),
             'coh': coh_val,
+            'sparse': loss_sparse.item(),
         })
         
-        # 日志和可视化
         if epoch % 200 == 0 or epoch == num_epochs - 1:
             log = losses_log[-1]
             phase = "2" if epoch >= phase2_start else "1"
             print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
                   f"T={log['total']:7.3f} R={log['render']:.3f} "
-                  f"M={log['met']:.3f} V={log['vol']:.3f} C={log['coh']:.3f}")
+                  f"M={log['met']:.3f} V={log['vol']:.3f} "
+                  f"C={log['coh']:.3f} S={log['sparse']:.3f}")
             
-            if epoch <= 600 or epoch % 200 == 0:  # 减频可视化
-                plot_render_comparison(pred_color, target_img, H, W, epoch, output_path)
-                plot_metric_field(metric_field, H, W, epoch, output_path)
-                plot_atom_scatter(atoms, H, W, epoch, output_path)
+            plot_render_comparison(pred_color, target_img, H, W, epoch, output_path)
+            plot_metric_field(metric_field, H, W, epoch, output_path)
+            plot_atom_scatter(atoms, H, W, epoch, output_path)
         
-        if epoch % 400 == 0 and epoch > 0:
+        if epoch >= phase2_start and epoch == num_epochs - 1:
             plot_atom_distribution(atoms, H, W, epoch, output_path)
-            if epoch >= phase2_start:
-                plot_feature_similarity(atoms, epoch, output_path)
+            plot_feature_similarity(atoms, epoch, output_path)
     
     print(f"[5/5] 训练完成。保存模型并评估...")
     
@@ -247,12 +251,12 @@ if __name__ == '__main__':
     print(f"Device: {device}")
     
     atoms, field, log, metrics = train_scene(
-        H=64, W=64,
-        num_atoms=80,
-        num_epochs=300,
+        H=48, W=48,
+        num_atoms=60,
+        num_epochs=400,
         num_views=6,
-        phase2_start=150,
+        phase2_start=180,
         lr=5e-3,
         device=device,
-        output_dir='outputs/2d_final'
+        output_dir='outputs/2d_coverage'
     )
