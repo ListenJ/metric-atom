@@ -6,6 +6,7 @@ MetricAtom 2D 训练脚本 — 128x128 完整验证。
 
 import torch
 import numpy as np
+import os
 from pathlib import Path
 
 from src.geometry.metric_field import MetricField2D
@@ -165,8 +166,17 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
 
 if __name__ == '__main__':
     torch.set_default_dtype(torch.float32)
+    
+    n_threads = min(os.cpu_count() or 6, 8)
+    torch.set_num_threads(n_threads)
+    torch.set_num_interop_threads(n_threads)
+    os.environ.setdefault('MKL_NUM_THREADS', str(n_threads))
+    os.environ.setdefault('OMP_NUM_THREADS', str(n_threads))
+    os.environ.setdefault('KMP_BLOCKTIME', '0')
+    os.environ.setdefault('KMP_AFFINITY', 'granularity=fine,compact,1,0')
+    
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Device: {device}")
+    print(f"Device: {device}  |  Threads: {n_threads}  |  MKL: {torch.backends.mkl.is_available()}")
     
     atoms, field, log, metrics = train_scene(
         H=64, W=64,
