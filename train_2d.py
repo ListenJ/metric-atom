@@ -142,10 +142,9 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
     w_met = 0.01
     w_vol = 0.1
     w_coh = 1.0
-    w_sparse_pre = 0.02
-    w_sparse_post = 0.5
     
     losses_log = []
+    atom_contrib_accum = torch.zeros(len(atoms), device=device)
     
     print(f"[4/5] 开始训练 ({num_epochs} epochs, Phase 2 @ epoch {phase2_start})...")
     
@@ -153,18 +152,19 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
         frame_idx = epoch % num_views
         target_img = images[frame_idx].reshape(-1, 3)
         
-        pred_color, pred_depth, pred_alpha = volume_render_2d(
+        pred_color, pred_depth, pred_alpha, per_atom = volume_render_2d(
             rays_o, rays_d, atoms, metric_field,
-            num_samples=48, near=0.0, far=scene_size, scene_size=scene_size
+            num_samples=24, near=0.0, far=scene_size, scene_size=scene_size,
+            return_per_atom=True
         )
+        
+        atom_contrib_accum += per_atom.detach()
         
         loss_render = l1_loss(pred_color, target_img)
         loss_met = metric_smoothness_loss(metric_field) * w_met
         loss_vol = occupancy_coupling_loss(metric_field, occupancy,
                                            g_occ_target=1.0, g_bg_target=10.0) * w_vol
-        w_s = w_sparse_post if epoch >= phase2_start else w_sparse_pre
-        loss_sparse = torch.stack([a.existence_prob for a in atoms]).mean() * w_s
-        loss = loss_render + loss_met + loss_vol + loss_sparse
+        loss = loss_render + loss_met + loss_vol
         
         coh_val = 0.0
         if epoch >= phase2_start:
@@ -177,15 +177,24 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
         torch.nn.utils.clip_grad_norm_(all_params, 1.0)
         optimizer.step()
         
-        if epoch > 0 and epoch % 100 == 0:
-            if epoch >= phase2_start:
-                atoms = prune_atoms(atoms, threshold=0.25)
+        if epoch > 0 and epoch % 200 == 0:
+            threshold = torch.quantile(atom_contrib_accum, 0.1)
+            keep = atom_contrib_accum > threshold
+            pruned = len(atoms) - keep.sum().item()
+            if pruned > 0 and len(atoms) > 20:
+                atoms = [a for i, a in enumerate(atoms) if keep[i]]
+                atom_contrib_accum = atom_contrib_accum[keep]
+                print(f"  [Prune] Removed {pruned} low-contrib atoms (threshold={threshold:.4f}), {len(atoms)} left")
             
-            if epoch >= 50 and epoch <= 350:
+            atom_contrib_accum.zero_()
+            
+            if epoch >= 50 and epoch <= 1800:
                 atoms = seed_atoms_by_error(
                     atoms, pred_color, target_img, H, W, device,
-                    num_seeds=6, radius_min=0.05, radius_max=0.10
+                    num_seeds=8, radius_min=0.04, radius_max=0.08
                 )
+                extra = torch.zeros(len(atoms) - len(atom_contrib_accum), device=device)
+                atom_contrib_accum = torch.cat([atom_contrib_accum, extra])
             
             new_params = []
             existing_ids = {id(p) for p in all_params}
@@ -205,7 +214,6 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
             'met': loss_met.item(),
             'vol': loss_vol.item(),
             'coh': coh_val,
-            'sparse': loss_sparse.item(),
         })
         
         if epoch % 200 == 0 or epoch == num_epochs - 1:
@@ -214,7 +222,7 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
             print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
                   f"T={log['total']:7.3f} R={log['render']:.3f} "
                   f"M={log['met']:.3f} V={log['vol']:.3f} "
-                  f"C={log['coh']:.3f} S={log['sparse']:.3f}")
+                  f"C={log['coh']:.3f} A={len(atoms)}")
             
             plot_render_comparison(pred_color, target_img, H, W, epoch, output_path)
             plot_metric_field(metric_field, H, W, epoch, output_path)
@@ -251,12 +259,12 @@ if __name__ == '__main__':
     print(f"Device: {device}")
     
     atoms, field, log, metrics = train_scene(
-        H=48, W=48,
-        num_atoms=60,
-        num_epochs=400,
-        num_views=6,
-        phase2_start=180,
-        lr=5e-3,
+        H=96, W=96,
+        num_atoms=150,
+        num_epochs=2000,
+        num_views=8,
+        phase2_start=800,
+        lr=5e-4,
         device=device,
-        output_dir='outputs/2d_coverage'
+        output_dir='outputs/2d_render_prune'
     )

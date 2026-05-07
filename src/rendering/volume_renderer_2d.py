@@ -2,20 +2,28 @@ import torch
 import torch.nn as nn
 
 
-def volume_render_2d(rays_o, rays_d, atoms, metric_field, num_samples=256, near=0.0, far=1.0, scene_size=1.0):
+def volume_render_2d(rays_o, rays_d, atoms, metric_field, num_samples=256,
+                     near=0.0, far=1.0, scene_size=1.0, return_per_atom=False):
     """
     2D 体积渲染器（向量化版本）。
     
-    对所有原子并行计算，大幅加速 CPU 训练。
+    Args:
+        return_per_atom: 若为 True，额外返回 (A,) 的每个原子总密度贡献
     """
     N_rays = rays_o.shape[0]
     N_atoms = len(atoms)
     device = rays_o.device
     
+    empty_return = (
+        torch.zeros(N_rays, 3, device=device),
+        torch.zeros(N_rays, device=device),
+        torch.zeros(N_rays, device=device)
+    )
+    if return_per_atom:
+        empty_return += (torch.zeros(0, device=device),)
+    
     if N_atoms == 0:
-        return (torch.zeros(N_rays, 3, device=device),
-                torch.zeros(N_rays, device=device),
-                torch.zeros(N_rays, device=device))
+        return empty_return
     
     # 光线采样
     t_vals = torch.linspace(near, far, num_samples, device=device)
@@ -86,5 +94,11 @@ def volume_render_2d(rays_o, rays_d, atoms, metric_field, num_samples=256, near=
     rendered_color = (weights.unsqueeze(-1) * color).sum(dim=1)
     rendered_depth = (weights * t_vals.unsqueeze(0)).sum(dim=1)
     rendered_alpha = 1.0 - T[:, -1]
+    
+    if return_per_atom:
+        density_reshaped = density.reshape(N_atoms, N_rays, num_samples)
+        weights_expanded = weights.unsqueeze(0).expand(N_atoms, -1, -1)
+        per_atom_total = (density_reshaped * weights_expanded).sum(dim=(1, 2))
+        return rendered_color, rendered_depth, rendered_alpha, per_atom_total
     
     return rendered_color, rendered_depth, rendered_alpha
