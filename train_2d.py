@@ -148,17 +148,23 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
     
     print(f"[4/5] 开始训练 ({num_epochs} epochs, Phase 2 @ epoch {phase2_start})...")
     
+    prune_every = max(num_epochs // 10, 50)
+    
     for epoch in range(num_epochs):
         frame_idx = epoch % num_views
         target_img = images[frame_idx].reshape(-1, 3)
         
-        pred_color, pred_depth, pred_alpha, per_atom = volume_render_2d(
+        do_prune = (epoch > 0 and epoch % prune_every == 0)
+        
+        render_result = volume_render_2d(
             rays_o, rays_d, atoms, metric_field,
             num_samples=24, near=0.0, far=scene_size, scene_size=scene_size,
-            return_per_atom=True
+            return_per_atom=do_prune
         )
-        
-        atom_contrib_accum += per_atom.detach()
+        pred_color, pred_depth, pred_alpha = render_result[:3]
+        if do_prune:
+            per_atom = render_result[3]
+            atom_contrib_accum += per_atom.detach()
         
         loss_render = l1_loss(pred_color, target_img)
         loss_met = metric_smoothness_loss(metric_field) * w_met
@@ -177,7 +183,7 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
         torch.nn.utils.clip_grad_norm_(all_params, 1.0)
         optimizer.step()
         
-        if epoch > 0 and epoch % 200 == 0:
+        if do_prune:
             threshold = torch.quantile(atom_contrib_accum, 0.1)
             keep = atom_contrib_accum > threshold
             pruned = len(atoms) - keep.sum().item()
@@ -259,12 +265,12 @@ if __name__ == '__main__':
     print(f"Device: {device}")
     
     atoms, field, log, metrics = train_scene(
-        H=96, W=96,
-        num_atoms=150,
-        num_epochs=2000,
+        H=64, W=64,
+        num_atoms=100,
+        num_epochs=600,
         num_views=8,
-        phase2_start=800,
-        lr=5e-4,
+        phase2_start=250,
+        lr=5e-3,
         device=device,
         output_dir='outputs/2d_render_prune'
     )
