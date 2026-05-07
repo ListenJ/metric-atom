@@ -24,12 +24,11 @@ from src.visualization.plot_metric import (
 from src.visualization.plot_atoms import plot_atom_scatter
 
 
-def create_atoms(num_atoms, device, seed=42):
+def create_atoms(num_atoms, device, seed=42, radius_min=0.12, radius_max=0.18):
     """网格初始化原子，确保覆盖整个场景"""
     torch.manual_seed(seed)
     atoms = []
     
-    # 使用粗略的网格布局 + 小随机扰动
     grid_size = int(np.ceil(np.sqrt(num_atoms)))
     for i in range(grid_size):
         for j in range(grid_size):
@@ -40,7 +39,7 @@ def create_atoms(num_atoms, device, seed=42):
             u = np.clip(u, 0.1, 0.9)
             v = np.clip(v, 0.1, 0.9)
             mu = torch.tensor([u, v], device=device, dtype=torch.float32)
-            radius = 0.08 + torch.rand(1, device=device, dtype=torch.float32).item() * 0.07
+            radius = radius_min + torch.rand(1, device=device, dtype=torch.float32).item() * (radius_max - radius_min)
             color = torch.rand(3, device=device, dtype=torch.float32)
             atom = Atom2D(mu, radius=radius, color=color, feature_dim=16, eps=0.5)
             atoms.append(atom)
@@ -48,6 +47,65 @@ def create_atoms(num_atoms, device, seed=42):
             break
     
     return atoms
+
+
+def create_coarse_atoms(device, num_coarse=20, seed=42):
+    """第一阶段：大半径粗覆盖原子"""
+    return create_atoms(num_coarse, device, seed=seed, radius_min=0.15, radius_max=0.25)
+
+
+def prune_atoms(atoms, threshold=0.05):
+    """删除存在概率过低的原子"""
+    alive = [a for a in atoms if a.existence_prob.item() > threshold]
+    dead_count = len(atoms) - len(alive)
+    if dead_count > 0:
+        print(f"  [Prune] Removed {dead_count} dead atoms (eps < {threshold}), {len(alive)} remaining")
+    return alive
+
+
+def seed_atoms_by_error(atoms, pred_color, target_img, H, W, device, 
+                         num_seeds=8, radius_min=0.08, radius_max=0.12):
+    """
+    在渲染误差最高的区域初始化新原子。
+    返回更新后的原子列表。
+    """
+    # 计算逐像素渲染误差
+    error = (pred_color.detach() - target_img).abs().mean(dim=-1)
+    error_map = error.reshape(H, W)
+    
+    threshold = error_map.quantile(0.85)
+    high_error = error_map > threshold
+    
+    if high_error.sum() == 0:
+        return atoms
+    
+    # 从高误差区域随机采样
+    coords = torch.nonzero(high_error).float()
+    if len(coords) == 0:
+        return atoms
+    
+    idx = torch.randperm(len(coords))[:num_seeds]
+    new_mus = coords[idx].flip(-1)
+    new_mus[:, 0] = new_mus[:, 0] / W
+    new_mus[:, 1] = new_mus[:, 1] / H
+    
+    target_reshaped = target_img.detach().reshape(H, W, 3)
+    new_colors = []
+    for yx in coords[idx].long():
+        py, px = yx[0].item(), yx[1].item()
+        new_colors.append(target_reshaped[py, px])
+    new_colors = torch.stack(new_colors).to(device)
+    
+    new_atoms = []
+    for k in range(len(new_mus)):
+        mu = new_mus[k]
+        c = new_colors[k]
+        r = radius_min + torch.rand(1, device=device).item() * (radius_max - radius_min)
+        atom = Atom2D(mu, radius=r, color=c, feature_dim=16, eps=0.5)
+        new_atoms.append(atom)
+    
+    print(f"  [Seed] Added {len(new_atoms)} atoms in high-error regions (threshold={threshold:.3f})")
+    return atoms + new_atoms
 
 
 def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
@@ -112,8 +170,28 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
         
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(all_params, 1.0)  # 梯度裁剪
+        torch.nn.utils.clip_grad_norm_(all_params, 1.0)
         optimizer.step()
+        
+        if epoch > 0 and epoch % 100 == 0:
+            atoms = prune_atoms(atoms, threshold=0.05)
+            
+            if epoch >= 100 and epoch <= 500:
+                atoms = seed_atoms_by_error(
+                    atoms, pred_color, target_img, H, W, device,
+                    num_seeds=6, radius_min=0.08, radius_max=0.14
+                )
+            
+            new_params = []
+            existing_ids = {id(p) for p in all_params}
+            for atom in atoms:
+                for p in atom.parameters():
+                    if id(p) not in existing_ids:
+                        new_params.append(p)
+                        all_params.append(p)
+                        existing_ids.add(id(p))
+            if new_params:
+                optimizer.add_param_group({'params': new_params})
         
         losses_log.append({
             'epoch': epoch,
