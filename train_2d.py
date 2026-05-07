@@ -142,6 +142,7 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
     w_met = 0.01
     w_vol = 0.1
     w_coh = 1.0
+    repulsion_weight = 0.15
     
     losses_log = []
     atom_contrib_accum = torch.zeros(len(atoms), device=device)
@@ -174,9 +175,17 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
         
         coh_val = 0.0
         if epoch >= phase2_start:
-            loss_coh = coherence_loss(atoms, metric_field) * w_coh
+            loss_coh = coherence_loss(atoms, metric_field, repulsion_weight=repulsion_weight) * w_coh
             coh_val = loss_coh.item()
             loss += loss_coh
+            
+            if epoch == phase2_start:
+                with torch.no_grad():
+                    feats = torch.stack([a._feature for a in atoms])
+                    noise = torch.randn_like(feats) * 0.01
+                    for i, a in enumerate(atoms):
+                        a._feature.add_(noise[i])
+                print(f"  [Inject] Feature noise (std=0.01) added at Phase 2 start ({epoch})")
         
         optimizer.zero_grad()
         loss.backward()
@@ -222,13 +231,17 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
             'coh': coh_val,
         })
         
+        if epoch % 100 == 0:
+            feats = torch.stack([a._feature.detach() for a in atoms])
+            feat_std = feats.std(dim=0).mean().item()
+        
         if epoch % 200 == 0 or epoch == num_epochs - 1:
             log = losses_log[-1]
             phase = "2" if epoch >= phase2_start else "1"
             print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
                   f"T={log['total']:7.3f} R={log['render']:.3f} "
                   f"M={log['met']:.3f} V={log['vol']:.3f} "
-                  f"C={log['coh']:.3f} A={len(atoms)}")
+                  f"C={log['coh']:.3f} A={len(atoms)} FS={feat_std:.4f}")
             
             plot_render_comparison(pred_color, target_img, H, W, epoch, output_path)
             plot_metric_field(metric_field, H, W, epoch, output_path)
@@ -266,11 +279,11 @@ if __name__ == '__main__':
     
     atoms, field, log, metrics = train_scene(
         H=64, W=64,
-        num_atoms=100,
+        num_atoms=120,
         num_epochs=600,
         num_views=8,
         phase2_start=250,
         lr=5e-3,
         device=device,
-        output_dir='outputs/2d_render_prune'
+        output_dir='outputs/2d_repulsion'
     )
