@@ -148,9 +148,9 @@ def prune_atoms_contrib(contrib, atoms, birth_epochs, epoch,
     return kept, new_epochs
 
 
-def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
-                phase2_start=800, lr=5e-4, device='cpu', output_dir='outputs/2d_full'):
-    """完整训练流程"""
+def train_scene(H=128, W=128, num_atoms=200, num_epochs=3000, num_views=8,
+                phase2_start=1200, lr=1e-3, device='cpu', output_dir='outputs/2d_final'):
+    """完整训练流程 — 128x128覆盖率攻克版本"""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
@@ -168,11 +168,12 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
     metric_field = MetricField2D(H, W, init_scale=1.0).to(device)
     atoms = create_atoms(num_atoms, device, seed=42)
     
-    all_params = list(metric_field.parameters())
-    for atom in atoms:
-        all_params.extend(atom.parameters())
+    atom_params = [p for a in atoms for p in a.parameters()]
     
-    optimizer = torch.optim.Adam(all_params, lr=lr)
+    optimizer = torch.optim.Adam([
+        {'params': metric_field.parameters(), 'lr': lr},
+        {'params': atom_params, 'lr': lr * 3},
+    ])
     
     print(f"[3/5] 预计算光线...")
     rays_o, rays_d = RaySampler2D.generate_rays_orthographic(
@@ -191,12 +192,14 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
     print(f"[4/5] 开始训练 ({num_epochs} epochs, Phase 2 @ epoch {phase2_start})...")
     
     prune_every = max(num_epochs // 10, 50)
+    seed_every = 25
     
     for epoch in range(num_epochs):
         frame_idx = epoch % num_views
         target_img = images[frame_idx].reshape(-1, 3)
         
         do_prune = (epoch > 0 and epoch % prune_every == 0)
+        do_seed = (epoch > 0 and epoch % seed_every == 0 and epoch >= 50 and epoch <= 2700)
         
         render_result = volume_render_2d(
             rays_o, rays_d, atoms, metric_field,
@@ -237,6 +240,7 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
         
         optimizer.zero_grad()
         loss.backward()
+        all_params = [p for pg in optimizer.param_groups for p in pg['params']]
         torch.nn.utils.clip_grad_norm_(all_params, 1.0)
         optimizer.step()
         
@@ -248,27 +252,25 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
             atom_contrib_accum = atom_contrib_accum[:len(atoms)]
             atom_contrib_accum.zero_()
             
-            if epoch >= 50 and epoch <= 1800:
+            if do_seed:
                 atoms, added = seed_atoms_smart(
                     atoms, pred_color, target_img, H, W, device,
                     metric_field, occupancy, epoch,
-                    num_seeds=12, radius_min=0.04, radius_max=0.10
+                    num_seeds=10, radius_min=0.12, radius_max=0.18
                 )
                 extra = torch.zeros(added, device=device)
                 atom_contrib_accum = torch.cat([atom_contrib_accum, extra])
                 for a in atoms[-added:]:
                     atom_birth_epochs[id(a)] = epoch
-            
-            new_params = []
-            existing_ids = {id(p) for p in all_params}
-            for atom in atoms:
-                for p in atom.parameters():
-                    if id(p) not in existing_ids:
-                        new_params.append(p)
-                        all_params.append(p)
-                        existing_ids.add(id(p))
-            if new_params:
-                optimizer.add_param_group({'params': new_params})
+                
+                new_atom_params = []
+                for atom in atoms:
+                    for p in atom.parameters():
+                        if p not in optimizer.param_groups[1]['params']:
+                            new_atom_params.append(p)
+                
+                if new_atom_params:
+                    optimizer.add_param_group({'params': new_atom_params, 'lr': lr * 3})
         
         losses_log.append({
             'epoch': epoch,
@@ -335,12 +337,12 @@ if __name__ == '__main__':
     print(f"Device: {device}  |  Threads: {n_threads}  |  MKL: {torch.backends.mkl.is_available()}")
     
     atoms, field, log, metrics = train_scene(
-        H=48, W=48,
-        num_atoms=100,
-        num_epochs=300,
-        num_views=6,
-        phase2_start=120,
-        lr=5e-3,
+        H=128, W=128,
+        num_atoms=200,
+        num_epochs=3000,
+        num_views=8,
+        phase2_start=1200,
+        lr=1e-3,
         device=device,
-        output_dir='outputs/2d_coverage_boost'
+        output_dir='outputs/2d_final'
     )
