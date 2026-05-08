@@ -25,10 +25,8 @@ from src.visualization.plot_atoms import plot_atom_scatter
 
 
 def create_atoms(num_atoms, device, seed=42, radius_min=0.12, radius_max=0.18):
-    """网格初始化原子，确保覆盖整个场景"""
     torch.manual_seed(seed)
     atoms = []
-    
     grid_size = int(np.ceil(np.sqrt(num_atoms)))
     for i in range(grid_size):
         for j in range(grid_size):
@@ -42,70 +40,111 @@ def create_atoms(num_atoms, device, seed=42, radius_min=0.12, radius_max=0.18):
             radius = radius_min + torch.rand(1, device=device, dtype=torch.float32).item() * (radius_max - radius_min)
             color = torch.rand(3, device=device, dtype=torch.float32)
             atom = Atom2D(mu, radius=radius, color=color, feature_dim=16, eps=0.5)
+            atom.birth_epoch = 0
             atoms.append(atom)
         if len(atoms) >= num_atoms:
             break
-    
     return atoms
 
 
-def create_coarse_atoms(device, num_coarse=20, seed=42):
-    """第一阶段：大半径粗覆盖原子"""
-    return create_atoms(num_coarse, device, seed=seed, radius_min=0.15, radius_max=0.25)
-
-
-def prune_atoms(atoms, threshold=0.05):
-    """删除存在概率过低的原子"""
-    alive = [a for a in atoms if a.existence_prob.item() > threshold]
-    dead_count = len(atoms) - len(alive)
-    if dead_count > 0:
-        print(f"  [Prune] Removed {dead_count} dead atoms (eps < {threshold}), {len(alive)} remaining")
-    return alive
-
-
-def seed_atoms_by_error(atoms, pred_color, target_img, H, W, device, 
-                         num_seeds=8, radius_min=0.08, radius_max=0.12):
+def seed_atoms_smart(atoms, pred_color, target_img, H, W, device,
+                     metric_field, occupancy, epoch,
+                     num_seeds=12, radius_min=0.06, radius_max=0.12,
+                     blur_sigma=3.0):
     """
-    在渲染误差最高的区域初始化新原子。
-    返回更新后的原子列表。
+    智能播种：优先覆盖高渲染误差 + 低原子密度 + 物体内部区域。
+
+    结合三张热力图：
+    1) 渲染误差（L1）
+    2) 原子密度空间分布（高斯核平滑）
+    3) 占位掩码（鼓励在物体上播种）
     """
-    # 计算逐像素渲染误差
-    error = (pred_color.detach() - target_img).abs().mean(dim=-1)
-    error_map = error.reshape(H, W)
+    N = len(atoms)
+    error = (pred_color.detach() - target_img).abs().mean(dim=-1).reshape(H, W)
     
-    threshold = error_map.quantile(0.85)
-    high_error = error_map > threshold
+    from torch.nn.functional import conv2d
+    kernel_size = int(blur_sigma * 6 + 1) | 1
+    kernel = torch.exp(-torch.linspace(-3, 3, kernel_size, device=device)**2 / (2 * blur_sigma**2))
+    kernel = kernel.outer(kernel)
+    kernel = kernel / kernel.sum()
+    kernel = kernel.view(1, 1, kernel_size, kernel_size)
+    error_smooth = conv2d(error.unsqueeze(0).unsqueeze(0), kernel, padding=kernel_size//2).squeeze()
     
-    if high_error.sum() == 0:
-        return atoms
+    density_map = torch.zeros(H, W, device=device)
+    if N > 0:
+        mus = torch.stack([a.position for a in atoms])
+        radii = torch.stack([a.radius for a in atoms])
+        px = (mus[:, 0] * W).clamp(0, W-1).long()
+        py = (mus[:, 1] * H).clamp(0, H-1).long()
+        radius_px = (radii * W).clamp(min=1)
+        for i in range(N):
+            r = int(radius_px[i].item())
+            y_min = max(0, py[i] - r)
+            y_max = min(H, py[i] + r + 1)
+            x_min = max(0, px[i] - r)
+            x_max = min(W, px[i] + r + 1)
+            density_map[y_min:y_max, x_min:x_max] += 1
     
-    # 从高误差区域随机采样
-    coords = torch.nonzero(high_error).float()
-    if len(coords) == 0:
-        return atoms
+    density_smooth = conv2d(density_map.unsqueeze(0).unsqueeze(0), kernel, padding=kernel_size//2).squeeze()
     
+    # 组合得分：高误差 × (1/原子密度) × 占位权重
+    score = error_smooth / (density_smooth + 1.0) * (occupancy + 0.3)
+    
+    high_score = score > torch.quantile(score, 0.9)
+    if high_score.sum() < num_seeds:
+        high_score = score > torch.quantile(score, max(0.95 - N * 0.001, 0.7))
+    if high_score.sum() == 0:
+        return atoms, N
+    
+    coords = torch.nonzero(high_score).float()
     idx = torch.randperm(len(coords))[:num_seeds]
     new_mus = coords[idx].flip(-1)
     new_mus[:, 0] = new_mus[:, 0] / W
     new_mus[:, 1] = new_mus[:, 1] / H
     
-    target_reshaped = target_img.detach().reshape(H, W, 3)
-    new_colors = []
-    for yx in coords[idx].long():
-        py, px = yx[0].item(), yx[1].item()
-        new_colors.append(target_reshaped[py, px])
-    new_colors = torch.stack(new_colors).to(device)
+    target_rgb = target_img.detach().reshape(H, W, 3)
+    new_colors = torch.stack([target_rgb[int(y), int(x)] for y, x in coords[idx].flip(-1)]).to(device)
     
     new_atoms = []
     for k in range(len(new_mus)):
-        mu = new_mus[k]
-        c = new_colors[k]
-        r = radius_min + torch.rand(1, device=device).item() * (radius_max - radius_min)
-        atom = Atom2D(mu, radius=r, color=c, feature_dim=16, eps=0.5)
+        atom = Atom2D(new_mus[k], radius_min + torch.rand(1, device=device).item() * (radius_max - radius_min),
+                       new_colors[k], feature_dim=16, eps=0.5)
+        atom.birth_epoch = epoch
         new_atoms.append(atom)
     
-    print(f"  [Seed] Added {len(new_atoms)} atoms in high-error regions (threshold={threshold:.3f})")
-    return atoms + new_atoms
+    print(f"  [Seed] +{len(new_atoms)} (score-based, μ_score={score.max():.3f}, dens={density_smooth.mean():.1f})")
+    return atoms + new_atoms, len(new_atoms)
+
+
+def prune_atoms_contrib(contrib, atoms, birth_epochs, epoch, 
+                          threshold=0.1, min_atoms=30, protection=200):
+    """
+    渲染贡献剪枝 + 保护期。
+    只删 birth_epoch + protection < epoch 的原子。
+    """
+    N = len(atoms)
+    if N <= min_atoms:
+        return atoms, birth_epochs
+    
+    protect = [(i, birth_epochs.get(id(a), 0)) for i, a in enumerate(atoms)]
+    protect_mask = torch.tensor([(epoch - be >= protection) for _, be in protect],
+                                device=contrib.device)
+    
+    if protect_mask.sum() < min_atoms // 2:
+        return atoms, birth_epochs
+    
+    contrib_adjusted = contrib * protect_mask.float()
+    thresh = torch.quantile(contrib_adjusted[protect_mask], threshold) if protect_mask.any() else 0
+    keep = (contrib_adjusted > thresh) | ~protect_mask
+    
+    kept = [a for i, a in enumerate(atoms) if keep[i]]
+    new_epochs = {id(a): birth_epochs.get(id(a), 0) for i, a in enumerate(atoms) if keep[i]}
+    
+    pruned = len(atoms) - len(kept)
+    if pruned > 0:
+        print(f"  [Prune] -{pruned} (prot={protection}, thresh={thresh:.2f}, contrib_m={contrib.mean():.2f})")
+    
+    return kept, new_epochs
 
 
 def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
@@ -146,6 +185,7 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
     
     losses_log = []
     atom_contrib_accum = torch.zeros(len(atoms), device=device)
+    atom_birth_epochs = {id(a): 0 for a in atoms}
     
     print(f"[4/5] 开始训练 ({num_epochs} epochs, Phase 2 @ epoch {phase2_start})...")
     
@@ -185,7 +225,7 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
                     noise = torch.randn_like(feats) * 0.01
                     for i, a in enumerate(atoms):
                         a._feature.add_(noise[i])
-                print(f"  [Inject] Initial feature noise (std=0.01) at Phase 2 start")
+                print(f"  [Inject] Initial feature noise at Phase 2 start")
             
             if epoch > phase2_start and epoch % 100 == 0:
                 with torch.no_grad():
@@ -200,23 +240,23 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
         optimizer.step()
         
         if do_prune:
-            threshold = torch.quantile(atom_contrib_accum, 0.1)
-            keep = atom_contrib_accum > threshold
-            pruned = len(atoms) - keep.sum().item()
-            if pruned > 0 and len(atoms) > 20:
-                atoms = [a for i, a in enumerate(atoms) if keep[i]]
-                atom_contrib_accum = atom_contrib_accum[keep]
-                print(f"  [Prune] Removed {pruned} low-contrib atoms (threshold={threshold:.4f}), {len(atoms)} left")
-            
+            atoms, atom_birth_epochs = prune_atoms_contrib(
+                atom_contrib_accum, atoms, atom_birth_epochs, epoch,
+                threshold=0.1, min_atoms=30, protection=200
+            )
+            atom_contrib_accum = atom_contrib_accum[:len(atoms)]
             atom_contrib_accum.zero_()
             
             if epoch >= 50 and epoch <= 1800:
-                atoms = seed_atoms_by_error(
+                atoms, added = seed_atoms_smart(
                     atoms, pred_color, target_img, H, W, device,
-                    num_seeds=8, radius_min=0.04, radius_max=0.08
+                    metric_field, occupancy, epoch,
+                    num_seeds=12, radius_min=0.04, radius_max=0.10
                 )
-                extra = torch.zeros(len(atoms) - len(atom_contrib_accum), device=device)
+                extra = torch.zeros(added, device=device)
                 atom_contrib_accum = torch.cat([atom_contrib_accum, extra])
+                for a in atoms[-added:]:
+                    atom_birth_epochs[id(a)] = epoch
             
             new_params = []
             existing_ids = {id(p) for p in all_params}
@@ -292,5 +332,5 @@ if __name__ == '__main__':
         phase2_start=120,
         lr=5e-3,
         device=device,
-        output_dir='outputs/2d_repulsion_v2'
+        output_dir='outputs/2d_coverage_boost'
     )
