@@ -24,7 +24,8 @@ from src.visualization.plot_metric import (
 from src.visualization.plot_atoms import plot_atom_scatter
 
 
-def create_atoms(num_atoms, device, seed=42, radius_min=0.12, radius_max=0.18):
+def create_atoms(num_atoms, device, seed=42, radius_min=0.12, radius_max=0.20):
+    """改进二：增大初始半径（从0.08→0.12, max从0.18→0.20）"""
     torch.manual_seed(seed)
     atoms = []
     grid_size = int(np.ceil(np.sqrt(num_atoms)))
@@ -48,16 +49,12 @@ def create_atoms(num_atoms, device, seed=42, radius_min=0.12, radius_max=0.18):
 
 
 def seed_atoms_smart(atoms, pred_color, target_img, H, W, device,
-                     metric_field, occupancy, epoch,
-                     num_seeds=12, radius_min=0.06, radius_max=0.12,
-                     blur_sigma=3.0):
+                      metric_field, occupancy, epoch,
+                      num_seeds=12, radius_min=0.12, radius_max=0.18,
+                      blur_sigma=3.0):
     """
-    智能播种：优先覆盖高渲染误差 + 低原子密度 + 物体内部区域。
-
-    结合三张热力图：
-    1) 渲染误差（L1）
-    2) 原子密度空间分布（高斯核平滑）
-    3) 占位掩码（鼓励在物体上播种）
+    改进一：密度感知播种 — 瞄准高误差+低原子密度区域。
+    组合三张热力图：渲染误差、原子密度分布、占位掩码。
     """
     N = len(atoms)
     error = (pred_color.detach() - target_img).abs().mean(dim=-1).reshape(H, W)
@@ -117,32 +114,34 @@ def seed_atoms_smart(atoms, pred_color, target_img, H, W, device,
 
 
 def prune_atoms_contrib(contrib, atoms, birth_epochs, epoch, 
-                          threshold=0.1, min_atoms=30, protection=200):
+                           threshold=0.1, min_atoms=30, protection=150):
     """
-    渲染贡献剪枝 + 保护期。
-    只删 birth_epoch + protection < epoch 的原子。
+    改进三：剪枝保护期 + 选择性删除。
+    只删 birth_epoch + protection < epoch 的成熟原子，且贡献最低的10%。
     """
     N = len(atoms)
     if N <= min_atoms:
         return atoms, birth_epochs
     
-    protect = [(i, birth_epochs.get(id(a), 0)) for i, a in enumerate(atoms)]
-    protect_mask = torch.tensor([(epoch - be >= protection) for _, be in protect],
-                                device=contrib.device)
+    mature_atoms = [(i, a) for i, a in enumerate(atoms) 
+                    if epoch - birth_epochs.get(id(a), 0) >= protection]
     
-    if protect_mask.sum() < min_atoms // 2:
+    if len(mature_atoms) <= min_atoms // 2:
         return atoms, birth_epochs
     
-    contrib_adjusted = contrib * protect_mask.float()
-    thresh = torch.quantile(contrib_adjusted[protect_mask], threshold) if protect_mask.any() else 0
-    keep = (contrib_adjusted > thresh) | ~protect_mask
+    mature_indices = [i for i, _ in mature_atoms]
+    mature_contrib = contrib[mature_indices]
     
-    kept = [a for i, a in enumerate(atoms) if keep[i]]
-    new_epochs = {id(a): birth_epochs.get(id(a), 0) for i, a in enumerate(atoms) if keep[i]}
+    thresh = torch.quantile(mature_contrib, threshold)
+    delete_indices = [i for i, c in zip(mature_indices, mature_contrib) if c <= thresh]
+    
+    keep = [i for i in range(N) if i not in delete_indices]
+    kept = [atoms[i] for i in keep]
+    new_epochs = {id(a): birth_epochs.get(id(a), 0) for a in kept}
     
     pruned = len(atoms) - len(kept)
     if pruned > 0:
-        print(f"  [Prune] -{pruned} (prot={protection}, thresh={thresh:.2f}, contrib_m={contrib.mean():.2f})")
+        print(f"  [Prune] -{pruned} mature atoms (prot={protection}, thresh={thresh:.2f})")
     
     return kept, new_epochs
 
@@ -167,11 +166,12 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
     metric_field = MetricField2D(H, W, init_scale=1.0).to(device)
     atoms = create_atoms(num_atoms, device, seed=42)
     
-    all_params = list(metric_field.parameters())
-    for atom in atoms:
-        all_params.extend(atom.parameters())
+    atom_params = [p for a in atoms for p in a.parameters()]
     
-    optimizer = torch.optim.Adam(all_params, lr=lr)
+    optimizer = torch.optim.Adam([
+        {'params': metric_field.parameters(), 'lr': lr},
+        {'params': atom_params, 'lr': lr * 3},
+    ])
     
     print(f"[3/5] 预计算光线...")
     rays_o, rays_d = RaySampler2D.generate_rays_orthographic(
@@ -236,13 +236,14 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
         
         optimizer.zero_grad()
         loss.backward()
+        all_params = [p for pg in optimizer.param_groups for p in pg['params']]
         torch.nn.utils.clip_grad_norm_(all_params, 1.0)
         optimizer.step()
         
         if do_prune:
             atoms, atom_birth_epochs = prune_atoms_contrib(
                 atom_contrib_accum, atoms, atom_birth_epochs, epoch,
-                threshold=0.1, min_atoms=30, protection=200
+                threshold=0.1, min_atoms=30, protection=150
             )
             atom_contrib_accum = atom_contrib_accum[:len(atoms)]
             atom_contrib_accum.zero_()
@@ -251,23 +252,21 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
                 atoms, added = seed_atoms_smart(
                     atoms, pred_color, target_img, H, W, device,
                     metric_field, occupancy, epoch,
-                    num_seeds=12, radius_min=0.04, radius_max=0.10
+                    num_seeds=12, radius_min=0.12, radius_max=0.18
                 )
                 extra = torch.zeros(added, device=device)
                 atom_contrib_accum = torch.cat([atom_contrib_accum, extra])
                 for a in atoms[-added:]:
                     atom_birth_epochs[id(a)] = epoch
             
-            new_params = []
-            existing_ids = {id(p) for p in all_params}
+            new_atom_params = []
             for atom in atoms:
                 for p in atom.parameters():
-                    if id(p) not in existing_ids:
-                        new_params.append(p)
-                        all_params.append(p)
-                        existing_ids.add(id(p))
-            if new_params:
-                optimizer.add_param_group({'params': new_params})
+                    if p not in optimizer.param_groups[1]['params']:
+                        new_atom_params.append(p)
+            
+            if new_atom_params:
+                optimizer.add_param_group({'params': new_atom_params, 'lr': lr * 3})
         
         losses_log.append({
             'epoch': epoch,
@@ -325,12 +324,12 @@ if __name__ == '__main__':
     print(f"Device: {device}")
     
     atoms, field, log, metrics = train_scene(
-        H=48, W=48,
-        num_atoms=100,
-        num_epochs=300,
-        num_views=6,
-        phase2_start=120,
-        lr=5e-3,
+        H=128, W=128,
+        num_atoms=300,
+        num_epochs=2000,
+        num_views=8,
+        phase2_start=800,
+        lr=1e-3,
         device=device,
-        output_dir='outputs/2d_coverage_boost'
+        output_dir='outputs/2d_triple'
     )
