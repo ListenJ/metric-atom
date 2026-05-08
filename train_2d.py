@@ -142,7 +142,7 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
     w_met = 0.01
     w_vol = 0.1
     w_coh = 1.0
-    repulsion_weight = 0.15
+    repulsion_weight = 0.3
     
     losses_log = []
     atom_contrib_accum = torch.zeros(len(atoms), device=device)
@@ -185,7 +185,14 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=2000, num_views=8,
                     noise = torch.randn_like(feats) * 0.01
                     for i, a in enumerate(atoms):
                         a._feature.add_(noise[i])
-                print(f"  [Inject] Feature noise (std=0.01) added at Phase 2 start ({epoch})")
+                print(f"  [Inject] Initial feature noise (std=0.01) at Phase 2 start")
+            
+            if epoch > phase2_start and epoch % 100 == 0:
+                with torch.no_grad():
+                    feats = torch.stack([a._feature for a in atoms])
+                    noise = torch.randn_like(feats) * 0.02
+                    for i, a in enumerate(atoms):
+                        a._feature.add_(noise[i])
         
         optimizer.zero_grad()
         loss.backward()
@@ -278,12 +285,12 @@ if __name__ == '__main__':
     print(f"Device: {device}")
     
     atoms, field, log, metrics = train_scene(
-        H=64, W=64,
-        num_atoms=120,
-        num_epochs=600,
-        num_views=8,
-        phase2_start=250,
+        H=48, W=48,
+        num_atoms=100,
+        num_epochs=300,
+        num_views=6,
+        phase2_start=120,
         lr=5e-3,
         device=device,
-        output_dir='outputs/2d_repulsion'
+        output_dir='outputs/2d_repulsion_v2'
     )
