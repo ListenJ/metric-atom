@@ -1,13 +1,17 @@
 """
-MetricAtom 2D 训练脚本 — 128x128 完整验证。
+MetricAtom 2D 训练脚本 — 支持 64×64 验证 + 128×128 完整训练。
 
-目标：验证度量驱动聚类假设。
+目标：验证度量驱动聚类假设，BF16 混合精度 + CUDA 加速。
 """
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 import os
 from pathlib import Path
+from contextlib import nullcontext
+from torch.amp import GradScaler
+from scipy.ndimage import distance_transform_edt
 
 from src.geometry.metric_field import MetricField2D
 from src.atoms.atom_2d import Atom2D
@@ -25,7 +29,33 @@ from src.visualization.plot_metric import (
 from src.visualization.plot_atoms import plot_atom_scatter
 
 
-def create_atoms(num_atoms, device, seed=42, radius_min=0.12, radius_max=0.18):
+def create_atoms(num_atoms, device, seed=42, radius_min=0.25, radius_max=0.35, occupancy=None):
+    if occupancy is not None:
+        # 只在物体区域内初始化原子，确保一开始覆盖率就高
+        H, W = occupancy.shape
+        occ_pixels = torch.nonzero(occupancy > 0.5).float()  # (M, 2) each = (y, x)
+        if occ_pixels.shape[0] > 0:
+            torch.manual_seed(seed)
+            atoms = []
+            np.random.seed(seed)
+            for i in range(num_atoms):
+                idx = np.random.randint(0, occ_pixels.shape[0])
+                y, x = occ_pixels[idx][0].item(), occ_pixels[idx][1].item()
+                # Add small random offset for variety
+                u = (x + np.random.uniform(-3, 3)) / W
+                v = (y + np.random.uniform(-3, 3)) / H
+                u = np.clip(u, 0.05, 0.95)
+                v = np.clip(v, 0.05, 0.95)
+                mu = torch.tensor([u, v], device=device, dtype=torch.float32)
+                radius = radius_min + torch.rand(1, device=device, dtype=torch.float32).item() * (radius_max - radius_min)
+                color = torch.rand(3, device=device, dtype=torch.float32)
+                atom = Atom2D(mu, radius=radius, color=color, feature_dim=16, eps=0.5)
+                atom.birth_epoch = 0
+                atoms.append(atom)
+            print(f"  [Init] 全部 {num_atoms} 个原子初始化在物体区域 (occupancy引导)")
+            return atoms
+    
+    # 默认网格初始化（fallback）
     torch.manual_seed(seed)
     atoms = []
     grid_size = int(np.ceil(np.sqrt(num_atoms)))
@@ -88,8 +118,8 @@ def seed_atoms_smart(atoms, pred_color, target_img, H, W, device,
     
     density_smooth = conv2d(density_map.unsqueeze(0).unsqueeze(0), kernel, padding=kernel_size//2).squeeze()
     
-    # 组合得分：高误差 × (1/原子密度) × 占位权重
-    score = error_smooth / (density_smooth + 1.0) * (occupancy + 0.3)
+    # 组合得分：高误差 × (1/原子密度) × 当前帧占用权重（强力偏好物体像素）
+    score = error_smooth / (density_smooth + 1.0) * (occupancy * 10.0 + 0.2)
     
     high_score = score > torch.quantile(score, 0.9)
     if high_score.sum() < num_seeds:
@@ -104,7 +134,7 @@ def seed_atoms_smart(atoms, pred_color, target_img, H, W, device,
     new_mus[:, 1] = new_mus[:, 1] / H
     
     target_rgb = target_img.detach().reshape(H, W, 3)
-    new_colors = torch.stack([target_rgb[int(y), int(x)] for y, x in coords[idx].flip(-1)]).to(device)
+    new_colors = torch.stack([target_rgb[int(coord[0]), int(coord[1])] for coord in coords[idx]]).to(device)
     
     new_atoms = []
     for k in range(len(new_mus)):
@@ -148,11 +178,21 @@ def prune_atoms_contrib(contrib, atoms, birth_epochs, epoch,
     return kept, new_epochs
 
 
-def train_scene(H=128, W=128, num_atoms=200, num_epochs=3000, num_views=8,
-                phase2_start=1200, lr=1e-3, device='cpu', output_dir='outputs/2d_final'):
-    """完整训练流程 — 128x128覆盖率攻克版本"""
+def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
+                phase2_start=250, lr=1e-3, device='cuda', output_dir='outputs/2d_64x64',
+                bf16=False, num_samples=128, seed_every=25, prune_every=None,
+                render_chunk_size=None):
+    """完整训练流程 — 支持 64x64 快速验证和 128x128 训练"""
+    if device != 'cuda':
+        torch.backends.cudnn.benchmark = True
+        if bf16 and torch.cuda.is_bf16_supported():
+            print(f"[BF16] 已启用 bfloat16 自动混合精度 (模型保持 FP32)")
+    
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    
+    amp_ctx = torch.autocast(device_type='cuda', dtype=torch.bfloat16) if bf16 else nullcontext()
+    scaler = GradScaler('cuda', enabled=bf16)
     
     scene_size = 1.0
     
@@ -166,7 +206,15 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=3000, num_views=8,
     
     print(f"[2/5] 初始化度量场 ({H}x{W}) + {num_atoms} 个原子...")
     metric_field = MetricField2D(H, W, init_scale=1.0).to(device)
-    atoms = create_atoms(num_atoms, device, seed=42)
+    
+    # 预计算每帧的 occupancy（需要在创建原子之前）
+    frame_occupancy = torch.zeros(num_views, H, W, device=device)
+    for fv in range(num_views):
+        frame_masks = masks[fv]
+        frame_occupancy[fv] = (frame_masks.sum(dim=-1) > 0.5).float()
+    
+    atoms = create_atoms(num_atoms, device, seed=42, radius_min=0.25, radius_max=0.35,
+                         occupancy=frame_occupancy[0] if num_atoms > 0 else None)
     
     atom_params = [p for a in atoms for p in a.parameters()]
     
@@ -181,82 +229,159 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=3000, num_views=8,
     )
     
     w_met = 0.01
-    w_vol = 0.1
-    w_coh = 1.0
-    repulsion_weight = 0.3
+    w_vol = 0.02
+    w_coh = 2.0
+    w_pos = 5.0  # 位置正则化权重：阻止原子漂离物体区域
+    repulsion_weight = 5.0
+    
+    # ── 预计算物体距离图（Position Regularization） ──
+    occ_np = occupancy.cpu().numpy()
+    dist_to_obj = distance_transform_edt(1 - occ_np).astype(np.float32)  # 0在物体上, >0远离
+    dist_max = max(H, W)
+    dist_to_obj = np.clip(dist_to_obj / dist_max, 0.0, 1.0)  # 归一化到 [0, 1]
+    dist_map = torch.from_numpy(dist_to_obj).to(device).unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
     
     losses_log = []
     atom_contrib_accum = torch.zeros(len(atoms), device=device)
     atom_birth_epochs = {id(a): 0 for a in atoms}
     
-    print(f"[4/5] 开始训练 ({num_epochs} epochs, Phase 2 @ epoch {phase2_start})...")
+    # 64×64 快速验证用更激进的参数
+    is_quick = (H <= 64 and num_epochs <= 600)
+    prune_interval = max(num_epochs // 15, 20) if is_quick else (prune_every if prune_every else max(num_epochs // 10, 50))
+    protection_epochs = 100 if is_quick else 200
+    seed_freq = 15 if is_quick else seed_every
     
-    prune_every = max(num_epochs // 10, 50)
-    seed_every = 25
+    # 预计算每帧的 occupancy
+    frame_occupancy = torch.zeros(num_views, H, W, device=device)
+    for fv in range(num_views):
+        frame_occupancy[fv] = (masks[fv].sum(dim=-1) > 0.5).float()
+    
+    print(f"[4/5] 开始训练 ({num_epochs} epochs, Phase 2 @ epoch {phase2_start})...")
+    print(f"       Prune every {prune_interval}, Seed every {seed_freq}, Protection={protection_epochs}")
+    
+    if prune_every is None:
+        prune_every = max(num_epochs // 10, 50)
     
     for epoch in range(num_epochs):
         frame_idx = epoch % num_views
         target_img = images[frame_idx].reshape(-1, 3)
         
-        do_prune = (epoch > 0 and epoch % prune_every == 0)
-        do_seed = (epoch > 0 and epoch % seed_every == 0 and epoch >= 50 and epoch <= 2700)
-        
-        render_result = volume_render_2d(
-            rays_o, rays_d, atoms, metric_field,
-            num_samples=24, near=0.0, far=scene_size, scene_size=scene_size,
-            return_per_atom=do_prune
-        )
-        pred_color, pred_depth, pred_alpha = render_result[:3]
-        if do_prune:
-            per_atom = render_result[3]
-            atom_contrib_accum += per_atom.detach()
-        
-        loss_render = l1_loss(pred_color, target_img)
-        loss_met = metric_smoothness_loss(metric_field) * w_met
-        loss_vol = occupancy_coupling_loss(metric_field, occupancy,
-                                           g_occ_target=1.0, g_bg_target=10.0) * w_vol
-        loss = loss_render + loss_met + loss_vol
-        
-        coh_val = 0.0
-        if epoch >= phase2_start:
-            loss_coh = coherence_loss(atoms, metric_field, repulsion_weight=repulsion_weight) * w_coh
-            coh_val = loss_coh.item()
-            loss += loss_coh
-            
-            if epoch == phase2_start:
-                with torch.no_grad():
-                    feats = torch.stack([a._feature for a in atoms])
-                    noise = torch.randn_like(feats) * 0.01
-                    for i, a in enumerate(atoms):
-                        a._feature.add_(noise[i])
-                print(f"  [Inject] Initial feature noise at Phase 2 start")
-            
-            if epoch > phase2_start and epoch % 100 == 0:
-                with torch.no_grad():
-                    feats = torch.stack([a._feature for a in atoms])
-                    noise = torch.randn_like(feats) * 0.02
-                    for i, a in enumerate(atoms):
-                        a._feature.add_(noise[i])
+        do_prune = (epoch > 0 and epoch % prune_interval == 0)
+        do_seed = (epoch > 0 and epoch % seed_freq == 0 and epoch >= 50 and epoch <= 2700)
         
         optimizer.zero_grad()
-        loss.backward()
+        
+        # ── 分块渲染 + 逐块 backward（显存优化） ──
+        # 原版在全批量时创建 (A, N_rays*S, D) 巨张量 → 爆显存
+        # 将 16384 条光线分成块，逐块 backward 释放计算图
+        N_rays = rays_o.shape[0]
+        cs = render_chunk_size if render_chunk_size is not None else (4096 if N_rays > 8192 else N_rays)
+        num_chunks = (N_rays + cs - 1) // cs
+        loss_render_val = 0.0
+        pred_color_parts = []
+        
+        for chunk_idx, chunk_start in enumerate(range(0, N_rays, cs)):
+            chunk_end = min(chunk_start + cs, N_rays)
+            n_chunk = chunk_end - chunk_start
+            chunk_weight = n_chunk / N_rays
+            
+            with amp_ctx:
+                render_result = volume_render_2d(
+                    rays_o[chunk_start:chunk_end], rays_d[chunk_start:chunk_end],
+                    atoms, metric_field,
+                    num_samples=num_samples, near=0.0, far=scene_size, scene_size=scene_size,
+                    return_per_atom=do_prune
+                )
+                pred_color_c, _, _ = render_result[:3]
+                pred_color_parts.append(pred_color_c.detach())
+                
+                # 渲染损失（只有光线相关）
+                loss_render_c = l1_loss(pred_color_c, target_img[chunk_start:chunk_end])
+                
+                if do_prune:
+                    per_atom_c = render_result[3]
+                    if chunk_idx == 0:
+                        per_atom_frame = per_atom_c.detach()
+                    else:
+                        per_atom_frame += per_atom_c.detach()
+            
+            # 逐块 backward → 释放该块计算图
+            scaler.scale(loss_render_c * chunk_weight).backward()
+            loss_render_val += loss_render_c.detach().item() * chunk_weight
+        
+        # 整理全帧 pred_color（用于可视化/播种）
+        pred_color = torch.cat(pred_color_parts, dim=0)
+        
+        if do_prune:
+            atom_contrib_accum += per_atom_frame
+        
+        # ── 正则化损失（全原子/全度量场，一次性 backward） ──
+        coh_val = 0.0
+        loss_pos_t = torch.tensor(0.0, device=device)
+        with amp_ctx:
+            loss_met = metric_smoothness_loss(metric_field) * w_met
+            loss_vol = occupancy_coupling_loss(metric_field, occupancy,
+                                               g_occ_target=1.0, g_bg_target=10.0) * w_vol
+            
+            # ── Position Regularization ──
+            if w_pos > 0 and len(atoms) > 0:
+                atom_positions = torch.stack([a.position for a in atoms])
+                grid = atom_positions.unsqueeze(0).unsqueeze(2) * 2 - 1
+                pos_dist = F.grid_sample(dist_map, grid, mode='bilinear',
+                                         padding_mode='border', align_corners=False)
+                pos_dist = pos_dist.squeeze()
+                if pos_dist.dim() == 0:
+                    pos_dist = pos_dist.unsqueeze(0)
+                loss_pos_t = pos_dist.mean() * w_pos
+            
+            loss_reg = loss_met + loss_vol + loss_pos_t
+            
+            if epoch >= phase2_start:
+                loss_coh = coherence_loss(atoms, metric_field, repulsion_weight=repulsion_weight) * w_coh
+                coh_val = loss_coh.item()
+                loss_reg += loss_coh
+                
+                if epoch == phase2_start:
+                    with torch.no_grad():
+                        feats = torch.stack([a._feature for a in atoms])
+                        noise = torch.randn_like(feats) * 0.01
+                        for i, a in enumerate(atoms):
+                            a._feature.add_(noise[i])
+                    print(f"  [Inject] Initial feature noise at Phase 2 start")
+                
+                if epoch > phase2_start and epoch % 100 == 0:
+                    with torch.no_grad():
+                        feats = torch.stack([a._feature for a in atoms])
+                        noise = torch.randn_like(feats) * 0.02
+                        for i, a in enumerate(atoms):
+                            a._feature.add_(noise[i])
+        
+        # 正则化损失 backward（图和渲染损失的图已释放，显存充裕）
+        scaler.scale(loss_reg).backward()
+        
+        # ── 优化器步进 ──
+        scaler.unscale_(optimizer)
         all_params = [p for pg in optimizer.param_groups for p in pg['params']]
         torch.nn.utils.clip_grad_norm_(all_params, 1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         
+        # ── 剪枝和播种（在 autocast 外部） ──
         if do_prune:
             atoms, atom_birth_epochs = prune_atoms_contrib(
                 atom_contrib_accum, atoms, atom_birth_epochs, epoch,
-                threshold=0.1, min_atoms=30, protection=200
+                threshold=0.05 if is_quick else 0.1, min_atoms=40, protection=protection_epochs
             )
             atom_contrib_accum = atom_contrib_accum[:len(atoms)]
             atom_contrib_accum.zero_()
             
             if do_seed:
+                seed_count = max(12, H // 5) if is_quick else max(8, H // 8)
+                frame_occ = frame_occupancy[frame_idx]
                 atoms, added = seed_atoms_smart(
                     atoms, pred_color, target_img, H, W, device,
-                    metric_field, occupancy, epoch,
-                    num_seeds=10, radius_min=0.12, radius_max=0.18
+                    metric_field, frame_occ, epoch,
+                    num_seeds=seed_count, radius_min=0.20, radius_max=0.30
                 )
                 extra = torch.zeros(added, device=device)
                 atom_contrib_accum = torch.cat([atom_contrib_accum, extra])
@@ -264,9 +389,13 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=3000, num_views=8,
                     atom_birth_epochs[id(a)] = epoch
                 
                 new_atom_params = []
+                existing_ids = set()
+                for pg in optimizer.param_groups:
+                    for p in pg['params']:
+                        existing_ids.add(id(p))
                 for atom in atoms:
                     for p in atom.parameters():
-                        if p not in optimizer.param_groups[1]['params']:
+                        if id(p) not in existing_ids:
                             new_atom_params.append(p)
                 
                 if new_atom_params:
@@ -274,11 +403,12 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=3000, num_views=8,
         
         losses_log.append({
             'epoch': epoch,
-            'total': loss.item(),
-            'render': loss_render.item(),
+            'total': loss_render_val + loss_reg.item(),
+            'render': loss_render_val,
             'met': loss_met.item(),
             'vol': loss_vol.item(),
             'coh': coh_val,
+            'pos': loss_pos_t.item(),
         })
         
         if epoch % 100 == 0:
@@ -291,7 +421,8 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=3000, num_views=8,
             print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
                   f"T={log['total']:7.3f} R={log['render']:.3f} "
                   f"M={log['met']:.3f} V={log['vol']:.3f} "
-                  f"C={log['coh']:.3f} A={len(atoms)} FS={feat_std:.4f}")
+                  f"C={log['coh']:.3f} P={log['pos']:.4f} "
+                  f"A={len(atoms)} FS={feat_std:.4f}")
             
             plot_render_comparison(pred_color, target_img, H, W, epoch, output_path)
             plot_metric_field(metric_field, H, W, epoch, output_path)
@@ -323,26 +454,80 @@ def train_scene(H=128, W=128, num_atoms=200, num_epochs=3000, num_views=8,
 
 
 if __name__ == '__main__':
-    torch.set_default_dtype(torch.float32)
+    import argparse
+    parser = argparse.ArgumentParser(description='MetricAtom 2D Training')
+    parser.add_argument('--resolution', type=int, default=64, choices=[64, 128],
+                        help='Resolution: 64 for validation, 128 for full training')
+    parser.add_argument('--epochs', type=int, default=0,
+                        help='Number of epochs (0=auto: 600 for 64x64, 3000 for 128x128)')
+    parser.add_argument('--bf16', action='store_true', default=True,
+                        help='Enable BF16 mixed precision training')
+    parser.add_argument('--atom', type=int, default=0,
+                        help='Initial atom count (0=auto)')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--samples', type=int, default=0,
+                        help='Ray samples per ray (0=auto)')
+    parser.add_argument('--chunk-size', type=int, default=0,
+                        help='Render chunk size for VRAM (0=auto: 4096 for 128×128, full for 64×64)')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output directory override')
+    args = parser.parse_args()
     
-    n_threads = min(os.cpu_count() or 6, 8)
+    H = W = args.resolution
+    is_64 = (H == 64)
+    
+    if args.epochs > 0:
+        num_epochs = args.epochs
+    else:
+        num_epochs = 600 if is_64 else 3000
+    
+    num_atoms = args.atom if args.atom > 0 else (100 if is_64 else 200)
+    # Phase 2: 覆盖率验证需要更早期开始（64×64 时 ~40%）
+    phase2_start = int(num_epochs * 0.4) if is_64 else (num_epochs * 2 // 5)
+    num_samples = args.samples if args.samples > 0 else (64 if is_64 else 128)
+    seed_every = 25 if is_64 else 25
+    
+    output_dir = args.output if args.output else f'outputs/2d_{H}x{W}{"_bf16" if args.bf16 else ""}_v2'
+    render_chunk_size = args.chunk_size if args.chunk_size > 0 else (4096 if H >= 128 else W * H)
+    
+    # 使用默认 dtype (FP32)，通过 autocast 在 forward 时转换为 BF16
+    
+    n_threads = min(os.cpu_count() or 8, 8)
     torch.set_num_threads(n_threads)
     torch.set_num_interop_threads(n_threads)
     os.environ.setdefault('MKL_NUM_THREADS', str(n_threads))
     os.environ.setdefault('OMP_NUM_THREADS', str(n_threads))
     os.environ.setdefault('KMP_BLOCKTIME', '0')
     os.environ.setdefault('KMP_AFFINITY', 'granularity=fine,compact,1,0')
+    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'max_split_size_mb:128')
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Device: {device}  |  Threads: {n_threads}  |  MKL: {torch.backends.mkl.is_available()}")
+    bf16_enabled = args.bf16 and device == 'cuda' and torch.cuda.is_bf16_supported()
+    
+    if device == 'cuda':
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
+        print(f"CUDA: {torch.version.cuda}  |  cuDNN: {torch.backends.cudnn.version()}")
+        print(f"BF16: {'Enabled' if bf16_enabled else 'Not supported, using FP32'}")
+    else:
+        print(f"Device: {device} (CPU fallback)")
+    
+    print(f"Resolution: {H}x{W}  |  Atoms: {num_atoms}  |  Epochs: {num_epochs}")
+    print(f"Phase 2 start: {phase2_start}  |  Samples: {num_samples}")
+    print(f"LR: {args.lr}  |  Chunk: {render_chunk_size}  |  Output: {output_dir}")
     
     atoms, field, log, metrics = train_scene(
-        H=128, W=128,
-        num_atoms=200,
-        num_epochs=3000,
+        H=H, W=W,
+        num_atoms=num_atoms,
+        num_epochs=num_epochs,
         num_views=8,
-        phase2_start=1200,
-        lr=1e-3,
+        phase2_start=phase2_start,
+        lr=args.lr,
         device=device,
-        output_dir='outputs/2d_final'
+        output_dir=output_dir,
+        bf16=bf16_enabled,
+        num_samples=num_samples,
+        seed_every=seed_every,
+        render_chunk_size=render_chunk_size,
     )

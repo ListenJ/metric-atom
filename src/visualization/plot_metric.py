@@ -83,7 +83,9 @@ def plot_metric_field(metric_field, H, W, step, output_path):
     """度量场可视化：迹 + 特征值"""
     import torch
     
-    # 密集采样计算度量迹
+    device = metric_field.params.device
+    
+    # 密集采样计算度量迹 (trace() 不带参数时在全场计算，无设备问题)
     trace = metric_field.trace().detach().cpu().numpy()
     
     # 在网格上采样度量计算特征值
@@ -96,8 +98,8 @@ def plot_metric_field(metric_field, H, W, step, output_path):
     
     for i, cy in enumerate(coords_h):
         for j, cx in enumerate(coords_w):
-            coord = torch.tensor([[cx, cy]], dtype=torch.float32)
-            g = metric_field(coord).detach().squeeze(0)
+            coord = torch.tensor([[cx, cy]], dtype=torch.float32, device=device)
+            g = metric_field(coord).detach().cpu().squeeze(0)
             try:
                 eigs = torch.linalg.eigvalsh(g)
                 eig_max[i, j] = eigs[1].item()

@@ -75,3 +75,77 @@ class RaySampler2D:
         rays_d = rays_d / rays_d.norm(dim=-1, keepdim=True)  # 归一化
         
         return rays_o, rays_d
+
+
+class RaySampler3D:
+    """
+    3D 光线采样器。
+    生成从相机出发穿过像素平面的光线。
+    """
+
+    @staticmethod
+    def generate_rays(H, W, fx, fy, cam_pos, cam_rot, near=0.1, far=2.0, device='cpu'):
+        """
+        从相机生成 3D 光线（针孔相机模型）。
+
+        Args:
+            H, W: 图像分辨率
+            fx, fy: 焦距（像素单位）
+            cam_pos: (3,) 相机位置
+            cam_rot: (3, 3) 旋转矩阵（世界→相机）
+            near, far: 近远平面
+            device: 计算设备
+
+        Returns:
+            rays_o: (H*W, 3) 射线起点
+            rays_d: (H*W, 3) 射线方向（已归一化）
+        """
+        # 生成像素坐标
+        ys, xs = torch.meshgrid(
+            torch.arange(H, device=device),
+            torch.arange(W, device=device),
+            indexing='ij'
+        )
+
+        # 归一化到相机坐标系
+        x_cam = (xs - W / 2.0) / fx
+        y_cam = (ys - H / 2.0) / fy
+        z_cam = torch.ones_like(x_cam)  # 前向
+
+        # 相机空间光线方向
+        dirs_cam = torch.stack([x_cam, y_cam, z_cam], dim=-1)  # (H, W, 3)
+        dirs_cam = dirs_cam / dirs_cam.norm(dim=-1, keepdim=True)
+
+        # 转到世界空间
+        dirs_world = (cam_rot @ dirs_cam.unsqueeze(-1)).squeeze(-1)  # (H, W, 3)
+
+        rays_o = cam_pos.unsqueeze(0).unsqueeze(0).expand(H, W, -1)
+        rays_d = dirs_world
+
+        return rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
+
+    @staticmethod
+    def look_at(eye, target, up=None):
+        """
+        构建 look-at 旋转矩阵（世界→相机）。
+
+        Args:
+            eye: (3,) 相机位置
+            target: (3,) 目标点
+            up: (3,) 上方向，默认 (0,1,0)
+
+        Returns:
+            rot: (3, 3) 旋转矩阵
+        """
+        eye = torch.as_tensor(eye, dtype=torch.float32)
+        target = torch.as_tensor(target, dtype=torch.float32)
+        if up is None:
+            up = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
+
+        z = (eye - target) / (eye - target).norm()
+        x = torch.cross(up, z)
+        x = x / x.norm()
+        y = torch.cross(z, x)
+
+        rot = torch.stack([x, y, z], dim=0)  # (3, 3), 从世界到相机
+        return rot

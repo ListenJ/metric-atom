@@ -32,8 +32,10 @@ def coherence_loss(atoms, metric_field, feature_sigma=1.0, repulsion_weight=1.0)
     
     g_centers = metric_field(mus)
     dx = mus.unsqueeze(0) - mus.unsqueeze(1)
-    gx = torch.matmul(g_centers.unsqueeze(0), dx.unsqueeze(-1)).squeeze(-1)
-    d2 = (dx * gx).sum(dim=-1).clamp(min=0.0)
+    # d2[i,j] = dx[i,j]^T @ g[i] @ dx[i,j]
+    # dx: (N, N, 2), g_centers: (N, 2, 2)
+    d2 = torch.einsum('ijm,imn,ijn->ij', dx, g_centers, dx)  # (N, N)
+    d2 = d2.clamp(min=0.0)
     
     r_sum = radii.unsqueeze(0) + radii.unsqueeze(1)
     soft_adj = torch.sigmoid((r_sum ** 2 - d2) / (r_sum ** 2 + 1e-6))
