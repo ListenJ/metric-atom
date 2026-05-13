@@ -338,8 +338,8 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
             
             if epoch >= phase2_start:
                 loss_coh = contrastive_coherence_loss(atoms, metric_field,
-                                                      tau=0.5, pos_thresh=0.3, neg_thresh=2.0,
-                                                      var_weight=0.1) * w_coh
+                                                      tau=0.3, pos_thresh=0.4, neg_thresh=1.5,
+                                                      var_weight=0.3) * w_coh
                 coh_val = loss_coh.item()
                 loss_reg += loss_coh
                 
