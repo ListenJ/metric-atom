@@ -12,6 +12,7 @@ from pathlib import Path
 from contextlib import nullcontext
 from torch.amp import GradScaler
 from scipy.ndimage import distance_transform_edt
+from sklearn.cluster import KMeans
 
 from src.geometry.metric_field import MetricField2D
 from src.atoms.atom_2d import Atom2D
@@ -20,7 +21,7 @@ from src.rendering.volume_renderer_2d import volume_render_2d
 from src.losses.reconstruction import l1_loss
 from src.losses.metric_regularizer import metric_smoothness_loss
 from src.losses.occupancy_coupling import occupancy_coupling_loss
-from src.losses.coherence import coherence_loss
+from src.losses.coherence import contrastive_coherence_loss
 from src.data.synthetic_2d import generate_multi_view, get_occupancy
 from src.visualization.plot_metric import (
     plot_render_comparison, plot_atom_distribution, plot_metric_field,
@@ -229,10 +230,9 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
     )
     
     w_met = 0.01
-    w_vol = 0.02
+    w_vol = 0.2
     w_coh = 2.0
     w_pos = 5.0  # 位置正则化权重：阻止原子漂离物体区域
-    repulsion_weight = 5.0
     
     # ── 预计算物体距离图（Position Regularization） ──
     occ_np = occupancy.cpu().numpy()
@@ -337,24 +337,34 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
             loss_reg = loss_met + loss_vol + loss_pos_t
             
             if epoch >= phase2_start:
-                loss_coh = coherence_loss(atoms, metric_field, repulsion_weight=repulsion_weight) * w_coh
+                loss_coh = contrastive_coherence_loss(atoms, metric_field,
+                                                      tau=0.5, pos_thresh=0.3, neg_thresh=2.0,
+                                                      var_weight=0.1) * w_coh
                 coh_val = loss_coh.item()
                 loss_reg += loss_coh
                 
                 if epoch == phase2_start:
+                    # ── KMeans 空间先验特征初始化 ──
                     with torch.no_grad():
-                        feats = torch.stack([a._feature for a in atoms])
-                        noise = torch.randn_like(feats) * 0.01
+                        mus = torch.stack([a.position for a in atoms]).cpu().numpy()
+                        # 由于已知场景有 2 个物体，聚 2 类
+                        kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+                        labels = kmeans.fit_predict(mus)
+                        
+                        feat_dim = atoms[0]._feature.shape[0]
+                        # 为每个簇生成一个随机基向量（簇内相似，簇间不同）
+                        cluster_centroids = []
+                        for c in range(2):
+                            base = torch.randn(feat_dim, device=next(iter(atoms))._feature.device) * 0.5
+                            cluster_centroids.append(base)
+                        
                         for i, a in enumerate(atoms):
-                            a._feature.add_(noise[i])
-                    print(f"  [Inject] Initial feature noise at Phase 2 start")
-                
-                if epoch > phase2_start and epoch % 100 == 0:
-                    with torch.no_grad():
-                        feats = torch.stack([a._feature for a in atoms])
-                        noise = torch.randn_like(feats) * 0.02
-                        for i, a in enumerate(atoms):
-                            a._feature.add_(noise[i])
+                            c = labels[i]
+                            # 用簇基向量 + 小噪声初始化，使同一簇原子特征相近
+                            noise_small = torch.randn(feat_dim, device=a._feature.device) * 0.05
+                            a._feature.copy_(cluster_centroids[c] + noise_small)
+                    
+                    print(f"  [KMeans] Spatial feature init: {np.bincount(labels).tolist()} atoms per cluster")
         
         # 正则化损失 backward（图和渲染损失的图已释放，显存充裕）
         scaler.scale(loss_reg).backward()
