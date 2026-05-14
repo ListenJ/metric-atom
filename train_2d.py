@@ -22,6 +22,7 @@ from src.losses.reconstruction import l1_loss
 from src.losses.metric_regularizer import metric_smoothness_loss
 from src.losses.occupancy_coupling import occupancy_coupling_loss
 from src.losses.coherence import contrastive_coherence_loss
+from src.losses.diffusion import feature_diffusion_loss_v2 as feature_diffusion_loss
 from src.data.synthetic_2d import generate_multi_view, get_occupancy
 from src.visualization.plot_metric import (
     plot_render_comparison, plot_atom_distribution, plot_metric_field,
@@ -182,7 +183,12 @@ def prune_atoms_contrib(contrib, atoms, birth_epochs, epoch,
 def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
                 phase2_start=250, lr=1e-3, device='cuda', output_dir='outputs/2d_64x64',
                 bf16=False, num_samples=128, seed_every=25, prune_every=None,
-                render_chunk_size=None):
+                render_chunk_size=None, quick_mode=False,
+                # Hyperparameters for loss weighting
+                tau=0.5, pos_thresh=0.3, neg_thresh=2.0, var_weight=0.1,
+                w_met=0.01, w_vol=0.2, w_coh=2.0, w_pos=5.0,
+                # 特征扩散参数（v2 版本）
+                w_diff=0.0, diff_sigma_scale=0.5, diff_K=8, diff_alpha=1.0):
     """完整训练流程 — 支持 64x64 快速验证和 128x128 训练"""
     if device != 'cuda':
         torch.backends.cudnn.benchmark = True
@@ -208,6 +214,8 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
     print(f"[2/5] 初始化度量场 ({H}x{W}) + {num_atoms} 个原子...")
     metric_field = MetricField2D(H, W, init_scale=1.0).to(device)
     
+    diff_val = 0.0  # 扩散损失值（Phase 2 前保持 0）
+    
     # 预计算每帧的 occupancy（需要在创建原子之前）
     frame_occupancy = torch.zeros(num_views, H, W, device=device)
     for fv in range(num_views):
@@ -229,10 +237,8 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
         H, W, scene_size=scene_size, device=device
     )
     
-    w_met = 0.01
-    w_vol = 0.2
-    w_coh = 2.0
-    w_pos = 5.0  # 位置正则化权重：阻止原子漂离物体区域
+    # 以下权重通过函数参数传入（默认值保持原始行为）
+    # w_met, w_vol, w_coh, w_pos 来自函数参数
     
     # ── 预计算物体距离图（Position Regularization） ──
     occ_np = occupancy.cpu().numpy()
@@ -338,10 +344,20 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
             
             if epoch >= phase2_start:
                 loss_coh = contrastive_coherence_loss(atoms, metric_field,
-                                                      tau=0.5, pos_thresh=0.3, neg_thresh=2.0,
-                                                      var_weight=0.1) * w_coh
+                                                       tau=tau, pos_thresh=pos_thresh, neg_thresh=neg_thresh,
+                                                       var_weight=var_weight) * w_coh
                 coh_val = loss_coh.item()
                 loss_reg += loss_coh
+                
+                if w_diff > 0:
+                    loss_diff = feature_diffusion_loss(
+                        atoms, metric_field, H, W,
+                        sigma_scale=diff_sigma_scale, K=diff_K, alpha=diff_alpha
+                    ) * w_diff
+                    diff_val = loss_diff.item()
+                    loss_reg += loss_diff
+                else:
+                    diff_val = 0.0
                 
                 if epoch == phase2_start:
                     # ── KMeans 空间先验特征初始化 ──
@@ -418,6 +434,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
             'met': loss_met.item(),
             'vol': loss_vol.item(),
             'coh': coh_val,
+            'diff': diff_val,
             'pos': loss_pos_t.item(),
         })
         
@@ -428,31 +445,41 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
         if epoch % 200 == 0 or epoch == num_epochs - 1:
             log = losses_log[-1]
             phase = "2" if epoch >= phase2_start else "1"
-            print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
-                  f"T={log['total']:7.3f} R={log['render']:.3f} "
-                  f"M={log['met']:.3f} V={log['vol']:.3f} "
-                  f"C={log['coh']:.3f} P={log['pos']:.4f} "
-                  f"A={len(atoms)} FS={feat_std:.4f}")
+            if log.get('diff', 0.0) > 0:
+                print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
+                      f"T={log['total']:7.3f} R={log['render']:.3f} "
+                      f"M={log['met']:.3f} V={log['vol']:.3f} "
+                      f"C={log['coh']:.3f} D={log['diff']:.4f} "
+                      f"P={log['pos']:.4f} A={len(atoms)} FS={feat_std:.4f}")
+            else:
+                print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
+                      f"T={log['total']:7.3f} R={log['render']:.3f} "
+                      f"M={log['met']:.3f} V={log['vol']:.3f} "
+                      f"C={log['coh']:.3f} P={log['pos']:.4f} "
+                      f"A={len(atoms)} FS={feat_std:.4f}")
             
-            plot_render_comparison(pred_color, target_img, H, W, epoch, output_path)
-            plot_metric_field(metric_field, H, W, epoch, output_path)
-            plot_atom_scatter(atoms, H, W, epoch, output_path)
+            if not quick_mode:
+                plot_render_comparison(pred_color, target_img, H, W, epoch, output_path)
+                plot_metric_field(metric_field, H, W, epoch, output_path)
+                plot_atom_scatter(atoms, H, W, epoch, output_path)
         
         if epoch >= phase2_start and epoch == num_epochs - 1:
-            plot_atom_distribution(atoms, H, W, epoch, output_path)
-            plot_feature_similarity(atoms, epoch, output_path)
+            if not quick_mode:
+                plot_atom_distribution(atoms, H, W, epoch, output_path)
+                plot_feature_similarity(atoms, epoch, output_path)
     
     print(f"[5/5] 训练完成。保存模型并评估...")
     
-    # 保存模型状态
-    torch.save({
-        'metric_field': metric_field.state_dict(),
-        'atoms': [atom.state_dict() for atom in atoms],
-        'losses_log': losses_log,
-    }, output_path / 'checkpoint.pt')
-    
-    # 保存训练曲线
-    plot_loss_curves(losses_log, output_path, phase2_start)
+    if not quick_mode:
+        # 保存模型状态
+        torch.save({
+            'metric_field': metric_field.state_dict(),
+            'atoms': [atom.state_dict() for atom in atoms],
+            'losses_log': losses_log,
+        }, output_path / 'checkpoint.pt')
+        
+        # 保存训练曲线
+        plot_loss_curves(losses_log, output_path, phase2_start)
     
     # 生成完整评估报告
     metrics = generate_evaluation_report(
