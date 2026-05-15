@@ -2,7 +2,7 @@ import torch
 
 
 def contrastive_coherence_loss(atoms, metric_field, tau=0.5, pos_thresh=0.3, neg_thresh=2.0,
-                                var_weight=0.1):
+                                var_weight=0.1, diffused_feats=None):
     """
     有界对比凝聚损失 (InfoNCE 风格)。
 
@@ -20,6 +20,8 @@ def contrastive_coherence_loss(atoms, metric_field, tau=0.5, pos_thresh=0.3, neg
         pos_thresh: 正样本归一化距离阈值
         neg_thresh: 负样本归一化距离阈值
         var_weight: 方差正则化权重
+        diffused_feats: 可选，(N, D) 扩散后特征。若提供，则用扩散后特征计算余弦相似度；
+                        否则用原始原子特征。
 
     Returns:
         loss: 标量
@@ -29,8 +31,13 @@ def contrastive_coherence_loss(atoms, metric_field, tau=0.5, pos_thresh=0.3, neg
         return torch.tensor(0.0, device=atoms[0].position.device)
 
     mus = torch.stack([a.position for a in atoms])       # (N, 2)
-    feats = torch.stack([a._feature for a in atoms])     # (N, D)
     radii = torch.stack([a.radius for a in atoms])       # (N,)
+
+    # 使用扩散后特征（若提供）或原始特征
+    if diffused_feats is not None:
+        feats = diffused_feats
+    else:
+        feats = torch.stack([a._feature for a in atoms])     # (N, D)
 
     # ── 归一化特征（余弦相似度用） ──
     feats_norm = feats / (feats.norm(dim=-1, keepdim=True) + 1e-8)

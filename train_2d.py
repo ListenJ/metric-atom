@@ -22,7 +22,7 @@ from src.losses.reconstruction import l1_loss
 from src.losses.metric_regularizer import metric_smoothness_loss
 from src.losses.occupancy_coupling import occupancy_coupling_loss
 from src.losses.coherence import contrastive_coherence_loss
-from src.losses.diffusion import feature_diffusion_loss_v2 as feature_diffusion_loss
+from src.losses.diffusion import compute_geodesic_affinity, feature_diffusion
 from src.data.synthetic_2d import generate_multi_view, get_occupancy
 from src.visualization.plot_metric import (
     plot_render_comparison, plot_atom_distribution, plot_metric_field,
@@ -187,8 +187,10 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
                 # Hyperparameters for loss weighting
                 tau=0.5, pos_thresh=0.3, neg_thresh=2.0, var_weight=0.1,
                 w_met=0.01, w_vol=0.2, w_coh=2.0, w_pos=5.0,
-                # 特征扩散参数（v2 版本）
-                w_diff=0.0, diff_sigma_scale=0.5, diff_K=8, diff_alpha=1.0):
+                # Diffusion hyperparameters
+                diff_K=5, diff_alpha=0.5, diff_T=2,
+                # Random seed
+                seed=42):
     """完整训练流程 — 支持 64x64 快速验证和 128x128 训练"""
     if device != 'cuda':
         torch.backends.cudnn.benchmark = True
@@ -205,7 +207,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
     
     print(f"[1/5] 生成合成数据 ({H}x{W}, {num_views} 视角)...")
     images_np, masks_np, transforms = generate_multi_view(
-        H=H, W=W, num_objects=2, num_views=num_views, seed=42
+        H=H, W=W, num_objects=2, num_views=num_views, seed=seed
     )
     images = torch.from_numpy(images_np).float().to(device)
     masks = torch.from_numpy(masks_np).float().to(device)
@@ -214,15 +216,13 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
     print(f"[2/5] 初始化度量场 ({H}x{W}) + {num_atoms} 个原子...")
     metric_field = MetricField2D(H, W, init_scale=1.0).to(device)
     
-    diff_val = 0.0  # 扩散损失值（Phase 2 前保持 0）
-    
     # 预计算每帧的 occupancy（需要在创建原子之前）
     frame_occupancy = torch.zeros(num_views, H, W, device=device)
     for fv in range(num_views):
         frame_masks = masks[fv]
         frame_occupancy[fv] = (frame_masks.sum(dim=-1) > 0.5).float()
     
-    atoms = create_atoms(num_atoms, device, seed=42, radius_min=0.25, radius_max=0.35,
+    atoms = create_atoms(num_atoms, device, seed=seed, radius_min=0.25, radius_max=0.35,
                          occupancy=frame_occupancy[0] if num_atoms > 0 else None)
     
     atom_params = [p for a in atoms for p in a.parameters()]
@@ -250,6 +250,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
     losses_log = []
     atom_contrib_accum = torch.zeros(len(atoms), device=device)
     atom_birth_epochs = {id(a): 0 for a in atoms}
+    diff_val = 0.0  # 扩散相关指标（Phase 2 前保持 0）
     
     # 64×64 快速验证用更激进的参数
     is_quick = (H <= 64 and num_epochs <= 600)
@@ -343,21 +344,26 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
             loss_reg = loss_met + loss_vol + loss_pos_t
             
             if epoch >= phase2_start:
+                # ── 特征扩散（v0.3 新流程） ──
+                mus = torch.stack([a.position for a in atoms])
+                feats = torch.stack([a._feature for a in atoms])
+                
+                # 计算测地亲和矩阵
+                A = compute_geodesic_affinity(mus, metric_field, K=diff_K, tau_max_factor=3.0, s_factor=0.1)
+
+                # 特征扩散
+                diffused_feats = feature_diffusion(feats, A, alpha=diff_alpha, T=diff_T)
+                
+                # 监控：扩散前后特征差异（用于日志）
+                diff_val = ((diffused_feats - feats) ** 2).mean().item()
+                
+                # 用扩散后特征计算 InfoNCE 损失
                 loss_coh = contrastive_coherence_loss(atoms, metric_field,
                                                        tau=tau, pos_thresh=pos_thresh, neg_thresh=neg_thresh,
-                                                       var_weight=var_weight) * w_coh
+                                                       var_weight=var_weight,
+                                                       diffused_feats=diffused_feats) * w_coh
                 coh_val = loss_coh.item()
                 loss_reg += loss_coh
-                
-                if w_diff > 0:
-                    loss_diff = feature_diffusion_loss(
-                        atoms, metric_field, H, W,
-                        sigma_scale=diff_sigma_scale, K=diff_K, alpha=diff_alpha
-                    ) * w_diff
-                    diff_val = loss_diff.item()
-                    loss_reg += loss_diff
-                else:
-                    diff_val = 0.0
                 
                 if epoch == phase2_start:
                     # ── KMeans 空间先验特征初始化 ──
@@ -445,7 +451,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
         if epoch % 200 == 0 or epoch == num_epochs - 1:
             log = losses_log[-1]
             phase = "2" if epoch >= phase2_start else "1"
-            if log.get('diff', 0.0) > 0:
+            if epoch >= phase2_start:
                 print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
                       f"T={log['total']:7.3f} R={log['render']:.3f} "
                       f"M={log['met']:.3f} V={log['vol']:.3f} "
@@ -508,6 +514,33 @@ if __name__ == '__main__':
                         help='Render chunk size for VRAM (0=auto: 4096 for 128×128, full for 64×64)')
     parser.add_argument('--output', type=str, default=None,
                         help='Output directory override')
+    # ── Hyperparameter grid search args ──
+    parser.add_argument('--w-met', type=float, default=0.01,
+                        help='Metric smoothness weight (default: 0.01)')
+    parser.add_argument('--w-vol', type=float, default=0.2,
+                        help='Occupancy coupling weight (default: 0.2)')
+    parser.add_argument('--w-coh', type=float, default=2.0,
+                        help='Coherence (InfoNCE) weight (default: 2.0)')
+    parser.add_argument('--w-pos', type=float, default=5.0,
+                        help='Position regularization weight (default: 5.0)')
+    parser.add_argument('--tau', type=float, default=0.5,
+                        help='InfoNCE temperature (default: 0.5)')
+    parser.add_argument('--pos-thresh', type=float, default=0.3,
+                        help='InfoNCE positive threshold (default: 0.3)')
+    parser.add_argument('--neg-thresh', type=float, default=2.0,
+                        help='InfoNCE negative threshold (default: 2.0)')
+    parser.add_argument('--var-weight', type=float, default=0.1,
+                        help='InfoNCE variance weight (default: 0.1)')
+    parser.add_argument('--diff-k', type=int, default=5,
+                        help='Geodesic affinity K for adaptive sigma (default: 5)')
+    parser.add_argument('--diff-alpha', type=float, default=0.5,
+                        help='Diffusion step size alpha (default: 0.5)')
+    parser.add_argument('--diff-t', type=int, default=2,
+                        help='Diffusion iterations T (default: 2)')
+    parser.add_argument('--quick', action='store_true', default=False,
+                        help='Force quick mode (no visualizations)')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed (default: 42)')
     args = parser.parse_args()
     
     H = W = args.resolution
@@ -554,6 +587,7 @@ if __name__ == '__main__':
     print(f"Phase 2 start: {phase2_start}  |  Samples: {num_samples}")
     print(f"LR: {args.lr}  |  Chunk: {render_chunk_size}  |  Output: {output_dir}")
     
+    quick_override = args.quick or is_64
     atoms, field, log, metrics = train_scene(
         H=H, W=W,
         num_atoms=num_atoms,
@@ -567,4 +601,20 @@ if __name__ == '__main__':
         num_samples=num_samples,
         seed_every=seed_every,
         render_chunk_size=render_chunk_size,
+        quick_mode=quick_override,
+        # Loss hyperparams
+        tau=args.tau,
+        pos_thresh=args.pos_thresh,
+        neg_thresh=args.neg_thresh,
+        var_weight=args.var_weight,
+        w_met=args.w_met,
+        w_vol=args.w_vol,
+        w_coh=args.w_coh,
+        w_pos=args.w_pos,
+        # Diffusion hyperparams
+        diff_K=args.diff_k,
+        diff_alpha=args.diff_alpha,
+        diff_T=args.diff_t,
+        # Seed
+        seed=args.seed,
     )
