@@ -384,17 +384,20 @@ class MurmurationOnE:
             x_new = x_i + step * unit_tan[0]
             y_new = y_i + step * unit_tan[1]
 
-            # Newton projection onto curve
+            # Newton projection onto curve (overflow-safe)
             for _ in range(10):
-                f = y_new**2 - (x_new**3 + a * x_new + b)
+                x_new = max(-_XLIM, min(_XLIM, x_new))
+                y_new = max(-_XLIM, min(_XLIM, y_new))
+                x2 = x_new * x_new
+                f = y_new * y_new - (x_new * x2 + a * x_new + b)
                 if abs(f) < 1e-10:
                     break
-                Jx = -(3.0 * x_new**2 + a)
+                Jx = -(3.0 * x2 + a)
                 Jy = 2.0 * y_new
-                denom = Jx**2 + Jy**2
+                denom = Jx * Jx + Jy * Jy
                 if abs(denom) < 1e-15:
                     break
-                delta = f / denom
+                delta = max(-1.0, min(1.0, f / denom))
                 x_new += Jx * delta
                 y_new += Jy * delta
 
@@ -412,16 +415,20 @@ def _project_to_curve(
     x: float, y: float, a: float, b: float, max_iter: int = 50
 ) -> Tuple[float, float]:
     """Newton projection of (x,y) onto E: y² = x³ + ax + b."""
+    _xlim = 1e4
     for _ in range(max_iter):
-        f = y**2 - (x**3 + a * x + b)
+        x = max(-_xlim, min(_xlim, x))
+        y = max(-_xlim, min(_xlim, y))
+        x2 = x * x
+        f = y * y - (x * x2 + a * x + b)
         if abs(f) < 1e-12:
             break
-        Jx = -(3.0 * x**2 + a)
+        Jx = -(3.0 * x2 + a)
         Jy = 2.0 * y
-        denom = Jx**2 + Jy**2
+        denom = Jx * Jx + Jy * Jy
         if abs(denom) < 1e-15:
             break
-        delta = f / denom
+        delta = max(-1.0, min(1.0, f / denom))
         x += Jx * delta
         y += Jy * delta
     return (x, y)

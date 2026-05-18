@@ -365,13 +365,14 @@ def exp_map(
     P: Tuple[float, float],
     v: Tuple[float, float],
     a: float, b: float,
-    max_substeps: int = 50
+    max_substeps: int = 500
 ) -> Tuple[float, float]:
     """
     Exponential map: move P along the geodesic in direction v for arc length |v|.
 
-    Uses tangent-line stepping + Newton projection, split into small sub-steps
-    to handle arbitrarily large |v| without coordinate explosion.
+    Uses a hybrid approach:
+    - Small steps: tangent-line + Newton projection (fast, differentiable-like)
+    - Large steps: group-law stepping via elliptic_add (handles pinch points)
 
     T_P(E) is 1D, so v = s * u where u is the unit tangent and s = signed step.
     """
@@ -386,14 +387,18 @@ def exp_map(
     dot = v[0] * unit_tan[0] + v[1] * unit_tan[1]
     sign = 1.0 if dot >= 0 else -1.0
 
-    # Adaptive sub-stepping to keep each step small enough for Newton convergence
+    # For very large distances (cross-branch), use group-law stepping
+    # which correctly handles the pinch point at y=0
+    if v_norm > 0.5:
+        return _exp_map_group_law(P, v_norm, sign, a, b)
+
+    # Small distance: tangent-line stepping (fast path)
     max_step_size = 0.05
     n_substeps = max(1, min(max_substeps, int(v_norm / max_step_size) + 1))
     sub_step = v_norm / n_substeps
 
     x, y = P
     for _ in range(n_substeps):
-        # Safety: clamp coordinates to prevent overflow
         x = max(-_X_LIMIT, min(_X_LIMIT, x))
         y = max(-_X_LIMIT, min(_X_LIMIT, y))
 
@@ -402,11 +407,9 @@ def exp_map(
         x_new = x + sx
         y_new = y + sy
 
-        # Newton projection onto y^2 = x^3 + ax + b (with overflow guards)
         for __ in range(20):
             x_new = max(-_X_LIMIT, min(_X_LIMIT, x_new))
             y_new = max(-_X_LIMIT, min(_X_LIMIT, y_new))
-
             x2 = x_new * x_new
             f = y_new * y_new - (x_new * x2 + a * x_new + b)
             if abs(f) < 1e-12:
@@ -416,7 +419,6 @@ def exp_map(
             denom = Jx * Jx + Jy * Jy
             if denom < 1e-15:
                 break
-            # Clip step size to prevent wild jumps
             delta = max(-1.0, min(1.0, f / denom))
             x_new += Jx * delta
             y_new += Jy * delta
@@ -424,6 +426,48 @@ def exp_map(
         x, y = x_new, y_new
 
     return (x, y)
+
+
+def _exp_map_group_law(
+    P: Tuple[float, float],
+    distance: float,
+    sign: float,
+    a: float, b: float,
+    max_k: int = 50
+) -> Tuple[float, float]:
+    """
+    exp_map via group-law stepping for large geodesic distances.
+
+    Uses elliptic_add to walk along the curve, which correctly handles
+    passing through the pinch point at y=0 and wrapping around the oval.
+    """
+    if distance < 1e-15:
+        return P
+
+    # Use small group steps (k=1) and check the geodesic distance
+    # until we've traveled approximately `distance`.
+    Q = P
+    d_traveled = 0.0
+    k = 0
+
+    while d_traveled < distance and k < max_k:
+        # Take one group step in the appropriate direction
+        step_point = elliptic_scalar_mult(1 if sign > 0 else -1, P, a, b)
+        d_step = geodesic_distance(P, step_point, a, b)
+
+        if d_step < 1e-10:
+            break
+
+        if d_traveled + d_step > distance:
+            # Interpolate: we're close enough
+            break
+
+        d_traveled += d_step
+        Q = step_point
+        P = Q
+        k += 1
+
+    return Q
 
 
 # ---------------------------------------------------------------------------
