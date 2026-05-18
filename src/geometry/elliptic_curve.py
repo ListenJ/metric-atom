@@ -420,8 +420,8 @@ def exp_map(
             if denom < 1e-15:
                 break
             delta = max(-1.0, min(1.0, f / denom))
-            x_new += Jx * delta
-            y_new += Jy * delta
+            x_new -= Jx * delta
+            y_new -= Jy * delta
 
         x, y = x_new, y_new
 
@@ -433,39 +433,55 @@ def _exp_map_group_law(
     distance: float,
     sign: float,
     a: float, b: float,
-    max_k: int = 50
+    max_k: int = 200
 ) -> Tuple[float, float]:
     """
     exp_map via group-law stepping for large geodesic distances.
 
-    Uses elliptic_add to walk along the curve, which correctly handles
-    passing through the pinch point at y=0 and wrapping around the oval.
+    Finds a small nearby point Q_nearby via tangent+Newton, computes the
+    group displacement dQ = Q_nearby - P, then repeatedly adds dQ using
+    the group law, which correctly handles pinch points at y=0.
     """
     if distance < 1e-15:
         return P
 
-    # Use small group steps (k=1) and check the geodesic distance
-    # until we've traveled approximately `distance`.
+    # Find a small nearby point in the tangent direction
+    unit_tan = tangent_vector(P, a)
+    small_step = 0.01
+    x_near = P[0] + sign * small_step * unit_tan[0]
+    y_near = P[1] + sign * small_step * unit_tan[1]
+
+    # Newton project onto curve
+    for _ in range(20):
+        x_near = max(-_X_LIMIT, min(_X_LIMIT, x_near))
+        y_near = max(-_X_LIMIT, min(_X_LIMIT, y_near))
+        x2 = x_near * x_near
+        f = y_near * y_near - (x_near * x2 + a * x_near + b)
+        if abs(f) < 1e-12:
+            break
+        Jx = -(3.0 * x2 + a)
+        Jy = 2.0 * y_near
+        denom = Jx * Jx + Jy * Jy
+        if denom < 1e-15:
+            break
+        delta = max(-1.0, min(1.0, f / denom))
+        x_near -= Jx * delta
+        y_near -= Jy * delta
+
+    Q_nearby = (x_near, y_near)
+    if not is_on_curve(x_near, y_near, a, b, tol=1e-6):
+        return P  # can't find valid nearby point
+
+    # Group displacement
+    dQ = elliptic_sub(Q_nearby, P, a, b)
+    d_step = geodesic_distance(P, Q_nearby, a, b)
+    if d_step < 1e-10:
+        return P
+
+    n_steps = min(int(distance / d_step), max_k)
     Q = P
-    d_traveled = 0.0
-    k = 0
-
-    while d_traveled < distance and k < max_k:
-        # Take one group step in the appropriate direction
-        step_point = elliptic_scalar_mult(1 if sign > 0 else -1, P, a, b)
-        d_step = geodesic_distance(P, step_point, a, b)
-
-        if d_step < 1e-10:
-            break
-
-        if d_traveled + d_step > distance:
-            # Interpolate: we're close enough
-            break
-
-        d_traveled += d_step
-        Q = step_point
-        P = Q
-        k += 1
+    for _ in range(n_steps):
+        Q = elliptic_add(Q, dQ, a, b)
 
     return Q
 

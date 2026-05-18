@@ -398,8 +398,8 @@ class MurmurationOnE:
                 if abs(denom) < 1e-15:
                     break
                 delta = max(-1.0, min(1.0, f / denom))
-                x_new += Jx * delta
-                y_new += Jy * delta
+                x_new -= Jx * delta
+                y_new -= Jy * delta
 
             new_positions[i, 0] = x_new
             new_positions[i, 1] = y_new
@@ -429,8 +429,8 @@ def _project_to_curve(
         if abs(denom) < 1e-15:
             break
         delta = max(-1.0, min(1.0, f / denom))
-        x += Jx * delta
-        y += Jy * delta
+        x -= Jx * delta
+        y -= Jy * delta
     return (x, y)
 
 

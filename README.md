@@ -25,140 +25,57 @@ MetricAtom 是一个基于黎曼度量场和有界感知原子的三维场景理
 
 ```
 src/
-├── geometry/           # 黎曼度量场（2D/3D）、Cholesky 参数化
-│   ├── cholesky_param.py    # 2D/3D Cholesky 分解 → 正定度量矩阵
-│   └── metric_field.py      # MetricField2D / MetricField3D（三线性插值）
+├── geometry/           # 黎曼度量场（2D/3D）+ 椭圆曲线几何 (Phase 6b)
+│   ├── cholesky_param.py
+│   ├── metric_field.py
+│   ├── elliptic_curve.py    # ECO: 群运算 / log/exp 映射 / j-不变量
+│   └── murmuration.py       # Boids 在椭圆曲线上的动力学
 ├── atoms/              # 感知原子定义
-│   ├── base_atom.py         # 原子基类
-│   ├── atom_2d.py           # 2D 原子（smoothstep 截断，马氏距离）
-│   └── atom_3d.py           # 3D 原子
 ├── rendering/          # 体积渲染器
-│   ├── ray_sampler.py        # RaySampler2D / RaySampler3D（针孔相机模型）
-│   └── volume_renderer_2d.py # 2D/3D 可微体积渲染（向量化，17x 加速）
 ├── losses/             # 损失函数
-│   ├── reconstruction.py     # L1/L2 重建损失
-│   ├── coherence.py          # 凝聚损失（吸引 + 方差排斥）
-│   ├── metric_regularizer.py # 度量平滑损失（2D/3D）
-│   └── occupancy_coupling.py # 占位耦合损失
+│   ├── direct_cluster.py    # Direct Loss (Path 1+3, ARI 0.755)
+│   └── eco_cluster.py       # ECO Cluster Loss (Phase 6b, j-不变量稳定)
 ├── data/               # 合成数据生成
-│   ├── synthetic_2d.py       # 2D 多形状多视角场景
-│   └── synthetic_3d.py       # 3D 多球体场景（多视角渲染）
 ├── visualization/      # 可视化
-│   ├── plot_metric.py        # 度量场迹 / 特征值可视化
-│   ├── plot_atoms.py         # 原子分布散点图
-│   └── plot_3d.py            # 3D 评估报告
-└── training/           # 训练循环（规划中）
+└── training/           # 训练循环
 ```
 
 ## 当前进度
 
-### ✅ 已验证的功能
+### 实验结果（2026-05-18）
 
-| 功能 | 状态 | 说明 |
-|---|---|---|
-| 度量场 Cholesky 参数化 | ✅ 完成 | 2D 网格/3D 体素，保证正定性，双线性/三线性插值 |
-| 感知原子 smoothstep 截断 | ✅ 完成 | C² 连续，马氏距离空间支持 |
-| 体积渲染器（向量化） | ✅ 完成 | 2D/3D 渲染管线，17x 加速 |
-| 重建损失 | ✅ 完成 | L1 收敛至 0.04-0.08 |
-| 度量平滑损失 | ✅ 完成 | 2D/3D 空间连续性正则化 |
-| 占位耦合损失 | ✅ 完成 | 物体内 trace < 1，背景 trace > 9 |
-| 凝聚损失（吸引+方差排斥） | ✅ 完成 | 特征多样性保持 (feat_std > 0.3) |
-| 合成数据生成 | ✅ 完成 | 2D 多形状 + 3D 多球体场景 |
-| 动态原子管理（播种/剪枝） | ✅ 完成 | 渲染贡献剪枝 + 误差驱动播种 |
-| 原子位置正则化 | ✅ 完成 | 阻止原子漂离物体区域 |
-| BF16 混合精度训练 | ✅ 完成 | CUDA 加速，显存优化 |
-| Checkpoint 评估 | ✅ 完成 | 覆盖率 + ARI 快速验证 |
-| MKL CPU 优化 | ✅ 完成 | 6 线程，4x 加速 |
+| 实验 | ARI | NMI | Valid | 结论 |
+|------|-----|-----|-------|------|
+| seed 123 (64) | -0.0292 | 0.0049 | 58/82 | 失败 — 初始化接近分岔 |
+| **seed 456 (64)** | **0.9375** | 0.8992 | 64/82 | **优秀** — 远离奇异点 |
+| 3-object (64) | 0.1755 | 0.1928 | 66/82 | 差 — j-不变量冲突 |
+| 128×128 (seed 42) | 0.0000 | 0.0000 | 45/90 | 失败 — 高分辨率尖锐性加剧 |
 
-### 🚧 进行中
+**核心诊断**：Direct Loss 的 loss landscape 存在尖锐悬崖。Sinkhorn 软分配 $P_{ij}=e^{-C_{ij}/\varepsilon} / \sum_k e^{-C_{ik}/\varepsilon}$ 对成本矩阵一阶敏感，特征初始化的微小差异被指数放大。4 个 seed 中仅 1 个找到好盆地（$\sigma_{ARI}\approx 0.35$）。
 
-| 工作 | 进度 | 说明 |
-|---|---|---|
-| 直接测地聚类损失 (Path 1+3) | ✅ **突破** | ARI 0.440→**0.755**，替代 InfoNCE，消除黎曼空间甜区脆弱性 |
-| 3D 场景理解扩展 | 🔄 开发中 | 3D 度量场 + 3D 原子 + 3D 渲染 + 训练脚本完成 |
-| 超参网格搜索 | 🔄 Phase 4/5 进行中 | Phase 4: w_direct × sinkhorn_eps (20 runs) |
-| 论文撰写 | 📝 初稿中 | 私有仓库 |
+### 理论框架：ECO (Elliptic Curve Object)
 
-### 🏆 最新突破：直接测地聚类损失（2026-05-18）
+物体 = 椭圆曲线上的概率流形 $O = (E, \mu_E, v)$，身份由 j-不变量编码：
 
-**根因分析**：InfoNCE 在黎曼空间中存在逻辑循环——需要聚类来定义度量，又指望度量来定义聚类。度量场和特征同时控制正负样本间隔，导致可行域极度狭窄（w_vol=0.1±0.025 是悬崖）。
+$$j(E) = 1728 \cdot \frac{4a^3}{4a^3+27b^2}$$
 
-**解决方案**（Path 1+3 组合）：用 Sinkhorn 可微软分配替代 InfoNCE，直接最小化簇内测地距离。
+- **二阶稳定**：$\delta j = O(\|\delta\|^2)$ vs 特征空间的一阶敏感 $\delta C = O(\|\delta\|)$
+- **紧致流形**：$E(\mathbb{R}) \cong S^1$，Boids 不崩溃
+- **分岔检测**：$\Delta \to 0$ 意味着物体分裂/融合
 
-```
-度量场 g ──→ 占位耦合（学边界）──→ g 变锐利
-                              │
-                              ▼
-                        Sinkhorn 软分配 P（可微）
-                              │
-                              ▼
-                   L_direct = Σ_k P[:,k]ᵀ @ D²_g @ P[:,k]
-                              │
-                              ▼
-                        梯度同时回传 g 和特征
-```
+ECO 将 landscape 从尖锐悬崖（$\sigma_{ARI}\approx 0.35$）变为平坦山谷（预期 $\sigma_{ARI}\approx 0.08$）。
 
-| 指标 | InfoNCE 最佳 | 直接聚类损失 | 提升 |
-|---|---|---|---|
-| **ARI** | 0.440 | **0.755** | **+72%** |
-| **NMI** | 0.291 | **0.664** | **+128%** |
-| 簇平衡度 | — | **0.94** | 近乎完美 |
-| 甜区宽度 | 极窄 (w_vol=0.1±0.025) | **宽** | 数学必然稳定 |
-| 改动量 | — | ~200 行新代码 | `src/losses/direct_cluster.py` |
+详见 [`docs/phase6a_eco_theory.md`](docs/phase6a_eco_theory.md)。
 
-**技术要点**：
-1. **Sinkhorn 软分配**：基于特征-原型余弦相似度，可微，梯度流连续
-2. **直接测地距离优化**：L = Σ_k P[:,k]ᵀ @ D²_g @ P[:,k] / (cluster_mass)²，使簇内测地距离被度量场直接最小化
-3. **占位耦合保留**：度量场继续学习物体/背景边界，提供聚类所需的几何结构
-4. **特征扩散可选**：可在直接损失基础上叠加使用
+### 数学补充路线图
 
-### 📋 近期计划
-
-- [x] ~~ARI 突破 0.5~~ → **ARI 0.755 已超越目标**
-- [x] ~~InfoNCE 替代方案~~ → 直接测地聚类损失实现 + 验证
-- [ ] Phase 4 网格搜索完成 (w_direct × sinkhorn_eps, 20 runs)
-- [ ] Phase 5: w_met × w_vol 在新损失下重新扫描
-- [ ] 在 128×128 分辨率上验证最佳超参
-- [ ] 多物体（3-4 个）场景聚类评估
-- [ ] 3D 场景聚类验证
-
-## 训练配置
-
-| 参数 | 2D 验证 | 2D 完整 | 3D |
-|---|---|---|---|
-| 分辨率 | 64×64 | 128×128 | 64×64×64 |
-| 原子数 | 100 | 200 | 200 |
-| 训练步数 | 600 | 3000 | 2000 |
-| Phase 2 开始 | epoch 250 | epoch 1200 | epoch 800 |
-| 采样数/光线 | 64 | 128 | 128 |
-| 学习率 | 1e-3 | 1e-3 | 5e-4 |
-| 精度 | BF16 | BF16 | BF16 |
-
-## 快速开始
-
-```bash
-# 安装依赖
-pip install torch numpy scipy matplotlib opencv-python
-
-# 2D 快速验证（64×64, BF16, ~5min on CUDA）
-python train_2d.py --resolution 64 --epochs 600
-
-# 2D 完整训练（128×128, ~30min on CUDA）
-python train_2d.py --resolution 128 --epochs 3000
-
-# 3D 训练
-python train_3d.py
-
-# 评估 checkpoint
-python tasks/eval_checkpoint.py
-```
-
-## 环境要求
-
-- **Python** 3.10+
-- **PyTorch** 2.1+（推荐 CUDA 12+）
-- **CUDA** 可选（支持 BF16 的 GPU 最佳）
-- **CPU** MKL 加速（Intel CPU）
+| 优先级 | 数学领域 | 状态 | 目的 |
+|--------|---------|------|------|
+| P0-1 | 微分几何：EC 上的 exp/log 映射 | ✅ 完成 | Boids 能在 E 上跑 |
+| P0-2 | 动力系统：Lyapunov 稳定性 | 📝 待完成 | 证明不崩溃 |
+| P1-1 | 流形 Sinkhorn | ✅ 完成 | ECO 版 Direct Loss |
+| P1-2 | 分岔理论 | 📝 待完成 | 形式化非稳态检测 |
+| P2 | 代数几何/模空间 | 📝 待完成 | 理论深度 |
 
 ## 约束
 
@@ -170,12 +87,9 @@ python tasks/eval_checkpoint.py
 ## 分支说明
 
 | 分支 | 用途 |
-|---|---|
+|------|------|
 | `main` | 稳定发布版本 |
-| `feat/clustering-breakthrough` | 🆕 无监督聚类突破（InfoNCE + KMeans init + ARI 0.175） |
-| `feat/coverage-boost` | 空间覆盖率优化（最新实验） |
-| `exp/repulsion-redesign` | 方差排斥 + 特征多样性实验 |
-| `feat/atom-coverage` | 覆盖机制初版 |
+| `feat/clustering-breakthrough` | 无监督聚类突破（Direct Loss + ECO 理论框架） |
 
 ## 许可
 
