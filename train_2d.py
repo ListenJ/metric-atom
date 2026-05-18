@@ -22,6 +22,7 @@ from src.losses.reconstruction import l1_loss
 from src.losses.metric_regularizer import metric_smoothness_loss
 from src.losses.occupancy_coupling import occupancy_coupling_loss
 from src.losses.coherence import contrastive_coherence_loss
+from src.losses.direct_cluster import DirectClusterLoss
 from src.losses.diffusion import compute_geodesic_affinity, feature_diffusion
 from src.data.synthetic_2d import generate_multi_view, get_occupancy
 from src.visualization.plot_metric import (
@@ -180,35 +181,49 @@ def prune_atoms_contrib(contrib, atoms, birth_epochs, epoch,
     return kept, new_epochs
 
 
-def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
+def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_objects=2,
                 phase2_start=250, lr=1e-3, device='cuda', output_dir='outputs/2d_64x64',
-                bf16=False, num_samples=128, seed_every=25, prune_every=None,
+                bf16=False, fp16=False, num_samples=128, seed_every=25, prune_every=None,
                 render_chunk_size=None, quick_mode=False,
                 # Hyperparameters for loss weighting
                 tau=0.5, pos_thresh=0.3, neg_thresh=2.0, var_weight=0.1,
                 w_met=0.01, w_vol=0.2, w_coh=2.0, w_pos=5.0,
                 # Diffusion hyperparameters
                 diff_K=5, diff_alpha=0.5, diff_T=2,
+                # Direct cluster loss hyperparameters (Path 1+3)
+                use_direct_loss=True, w_direct=2.0, sinkhorn_eps=0.1, sinkhorn_iters=50, ent_weight=0.005,
                 # Random seed
                 seed=42):
     """完整训练流程 — 支持 64x64 快速验证和 128x128 训练"""
-    if device != 'cuda':
+    if device == 'cuda':
         torch.backends.cudnn.benchmark = True
+
+    # 混合精度策略: BF16 > FP16 > FP32
+    amp_ctx = nullcontext()
+    scaler_enabled = False
+    if device == 'cuda' and (bf16 or fp16):
         if bf16 and torch.cuda.is_bf16_supported():
-            print(f"[BF16] 已启用 bfloat16 自动混合精度 (模型保持 FP32)")
-    
+            amp_ctx = torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+            scaler_enabled = True
+            print(f"[AMP] BF16 混合精度")
+        elif fp16:
+            amp_ctx = torch.autocast(device_type='cuda', dtype=torch.float16)
+            scaler_enabled = True
+            print(f"[AMP] FP16 混合精度")
+        else:
+            print(f"[AMP] BF16 不可用，使用 FP32")
+    scaler = GradScaler('cuda', enabled=scaler_enabled)
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
-    amp_ctx = torch.autocast(device_type='cuda', dtype=torch.bfloat16) if bf16 else nullcontext()
-    scaler = GradScaler('cuda', enabled=bf16)
     
     scene_size = 1.0
     
     print(f"[1/5] 生成合成数据 ({H}x{W}, {num_views} 视角)...")
     images_np, masks_np, transforms = generate_multi_view(
-        H=H, W=W, num_objects=2, num_views=num_views, seed=seed
+        H=H, W=W, num_objects=num_objects, num_views=num_views, seed=seed
     )
+    n_clusters = num_objects  # 每个物体的原子自成一簇
     images = torch.from_numpy(images_np).float().to(device)
     masks = torch.from_numpy(masks_np).float().to(device)
     occupancy = torch.from_numpy(get_occupancy(masks_np)).float().to(device)
@@ -224,13 +239,31 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
     
     atoms = create_atoms(num_atoms, device, seed=seed, radius_min=0.25, radius_max=0.35,
                          occupancy=frame_occupancy[0] if num_atoms > 0 else None)
-    
+
+    # ── Direct Cluster Loss 模块（Path 1+3: Sinkhorn + 直接测地距离优化） ──
+    if use_direct_loss:
+        direct_cluster = DirectClusterLoss(
+            n_clusters=n_clusters, feature_dim=16,
+            sinkhorn_eps=sinkhorn_eps, sinkhorn_iters=sinkhorn_iters,
+            ent_weight=ent_weight
+        ).to(device)
+        direct_cluster_initialized = False
+    else:
+        direct_cluster = None
+        direct_cluster_initialized = True
+
     atom_params = [p for a in atoms for p in a.parameters()]
-    
-    optimizer = torch.optim.Adam([
+
+    optimizer_param_groups = [
         {'params': metric_field.parameters(), 'lr': lr},
         {'params': atom_params, 'lr': lr * 3},
-    ])
+    ]
+    if direct_cluster is not None:
+        optimizer_param_groups.append(
+            {'params': direct_cluster.parameters(), 'lr': lr * 3}
+        )
+
+    optimizer = torch.optim.Adam(optimizer_param_groups)
     
     print(f"[3/5] 预计算光线...")
     rays_o, rays_d = RaySampler2D.generate_rays_orthographic(
@@ -251,6 +284,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
     atom_contrib_accum = torch.zeros(len(atoms), device=device)
     atom_birth_epochs = {id(a): 0 for a in atoms}
     diff_val = 0.0  # 扩散相关指标（Phase 2 前保持 0）
+    cluster_balance_val = 0.0  # 簇平衡度（Phase 2 前保持 0）
     
     # 64×64 快速验证用更激进的参数
     is_quick = (H <= 64 and num_epochs <= 600)
@@ -344,49 +378,107 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
             loss_reg = loss_met + loss_vol + loss_pos_t
             
             if epoch >= phase2_start:
-                # ── 特征扩散（v0.3 新流程） ──
                 mus = torch.stack([a.position for a in atoms])
                 feats = torch.stack([a._feature for a in atoms])
-                
-                # 计算测地亲和矩阵
-                A = compute_geodesic_affinity(mus, metric_field, K=diff_K, tau_max_factor=3.0, s_factor=0.1)
 
-                # 特征扩散
-                diffused_feats = feature_diffusion(feats, A, alpha=diff_alpha, T=diff_T)
-                
-                # 监控：扩散前后特征差异（用于日志）
-                diff_val = ((diffused_feats - feats) ** 2).mean().item()
-                
-                # 用扩散后特征计算 InfoNCE 损失
-                loss_coh = contrastive_coherence_loss(atoms, metric_field,
-                                                       tau=tau, pos_thresh=pos_thresh, neg_thresh=neg_thresh,
-                                                       var_weight=var_weight,
-                                                       diffused_feats=diffused_feats) * w_coh
-                coh_val = loss_coh.item()
-                loss_reg += loss_coh
-                
-                if epoch == phase2_start:
-                    # ── KMeans 空间先验特征初始化 ──
-                    with torch.no_grad():
-                        mus = torch.stack([a.position for a in atoms]).cpu().numpy()
-                        # 由于已知场景有 2 个物体，聚 2 类
-                        kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
-                        labels = kmeans.fit_predict(mus)
-                        
-                        feat_dim = atoms[0]._feature.shape[0]
-                        # 为每个簇生成一个随机基向量（簇内相似，簇间不同）
-                        cluster_centroids = []
-                        for c in range(2):
-                            base = torch.randn(feat_dim, device=next(iter(atoms))._feature.device) * 0.5
-                            cluster_centroids.append(base)
-                        
-                        for i, a in enumerate(atoms):
-                            c = labels[i]
-                            # 用簇基向量 + 小噪声初始化，使同一簇原子特征相近
-                            noise_small = torch.randn(feat_dim, device=a._feature.device) * 0.05
-                            a._feature.copy_(cluster_centroids[c] + noise_small)
-                    
-                    print(f"  [KMeans] Spatial feature init: {np.bincount(labels).tolist()} atoms per cluster")
+                if use_direct_loss:
+                    # ═══════════════════════════════════════════════════
+                    # Path 1+3: Direct Metric Cluster Loss
+                    #
+                    # 度量场 → 占位耦合（学边界）
+                    #        → Sinkhorn 软分配（特征→原型 相似度）
+                    #        → 直接最小化簇内测地距离
+                    #
+                    # 替代 InfoNCE — 消除黎曼空间中的甜区脆弱性
+                    # ═══════════════════════════════════════════════════
+
+                    if epoch == phase2_start:
+                        # KMeans 初始化 prototypes（提供初始聚类种子）
+                        with torch.no_grad():
+                            mus_np = mus.cpu().numpy()
+                            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                            labels = kmeans.fit_predict(mus_np)
+
+                            # 初始化特征原型
+                            direct_cluster.init_prototypes(feats.detach(),
+                                                           torch.from_numpy(labels).to(device))
+
+                            # 同时初始化原子特征（簇内相似，簇间不同）
+                            feat_dim = feats.shape[1]
+                            for c in range(n_clusters):
+                                mask = labels == c
+                                if mask.sum() > 0:
+                                    base = direct_cluster.prototypes[c].detach()
+                                    for i, a in enumerate(atoms):
+                                        if mask[i]:
+                                            noise = torch.randn(feat_dim, device=device) * 0.05
+                                            a._feature.copy_(base + noise)
+
+                        direct_cluster_initialized = True
+                        print(f"  [DirectCluster] Prototypes init from KMeans: "
+                              f"{np.bincount(labels).tolist()} atoms per cluster")
+
+                    # 特征扩散（可选，与直接聚类损失互补）
+                    if diff_K > 0:
+                        A = compute_geodesic_affinity(mus, metric_field, K=diff_K,
+                                                       tau_max_factor=3.0, s_factor=0.1)
+                        diffused_feats = feature_diffusion(feats, A, alpha=diff_alpha, T=diff_T)
+                        diff_val = ((diffused_feats - feats) ** 2).mean().item()
+                        cluster_feats = diffused_feats
+                    else:
+                        diff_val = 0.0
+                        cluster_feats = feats
+
+                    # Direct cluster loss: Sinkhorn assignment + geodesic compaction
+                    loss_direct, P, dc_metrics = direct_cluster(
+                        mus, metric_field, cluster_feats
+                    )
+                    loss_coh = loss_direct * w_direct
+                    coh_val = loss_direct.item()
+                    cluster_balance_val = dc_metrics['cluster_balance']
+                    loss_reg += loss_coh
+
+                else:
+                    # ── 原 InfoNCE 路径（保留用于消融实验） ──
+                    # 计算测地亲和矩阵
+                    A = compute_geodesic_affinity(mus, metric_field, K=diff_K,
+                                                   tau_max_factor=3.0, s_factor=0.1)
+
+                    # 特征扩散
+                    diffused_feats = feature_diffusion(feats, A, alpha=diff_alpha, T=diff_T)
+
+                    # 监控：扩散前后特征差异
+                    diff_val = ((diffused_feats - feats) ** 2).mean().item()
+
+                    # InfoNCE 损失
+                    loss_coh = contrastive_coherence_loss(atoms, metric_field,
+                                                           tau=tau, pos_thresh=pos_thresh,
+                                                           neg_thresh=neg_thresh,
+                                                           var_weight=var_weight,
+                                                           diffused_feats=diffused_feats) * w_coh
+                    coh_val = loss_coh.item()
+                    loss_reg += loss_coh
+
+                    if epoch == phase2_start:
+                        # KMeans 空间先验特征初始化
+                        with torch.no_grad():
+                            mus_np = mus.cpu().numpy()
+                            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                            labels = kmeans.fit_predict(mus_np)
+
+                            feat_dim = feats.shape[1]
+                            cluster_centroids = []
+                            for c in range(n_clusters):
+                                base = torch.randn(feat_dim, device=device) * 0.5
+                                cluster_centroids.append(base)
+
+                            for i, a in enumerate(atoms):
+                                c = labels[i]
+                                noise_small = torch.randn(feat_dim, device=device) * 0.05
+                                a._feature.copy_(cluster_centroids[c] + noise_small)
+
+                        print(f"  [KMeans] Spatial feature init: "
+                              f"{np.bincount(labels).tolist()} atoms per cluster")
         
         # 正则化损失 backward（图和渲染损失的图已释放，显存充裕）
         scaler.scale(loss_reg).backward()
@@ -442,6 +534,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
             'coh': coh_val,
             'diff': diff_val,
             'pos': loss_pos_t.item(),
+            'balance': cluster_balance_val,
         })
         
         if epoch % 100 == 0:
@@ -452,11 +545,12 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8,
             log = losses_log[-1]
             phase = "2" if epoch >= phase2_start else "1"
             if epoch >= phase2_start:
+                bal_str = f" B={log.get('balance', 0):.2f}" if use_direct_loss else ""
                 print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
                       f"T={log['total']:7.3f} R={log['render']:.3f} "
                       f"M={log['met']:.3f} V={log['vol']:.3f} "
                       f"C={log['coh']:.3f} D={log['diff']:.4f} "
-                      f"P={log['pos']:.4f} A={len(atoms)} FS={feat_std:.4f}")
+                      f"P={log['pos']:.4f}{bal_str} A={len(atoms)} FS={feat_std:.4f}")
             else:
                 print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
                       f"T={log['total']:7.3f} R={log['render']:.3f} "
@@ -505,6 +599,8 @@ if __name__ == '__main__':
                         help='Number of epochs (0=auto: 600 for 64x64, 3000 for 128x128)')
     parser.add_argument('--bf16', action='store_true', default=True,
                         help='Enable BF16 mixed precision training')
+    parser.add_argument('--fp16', action='store_true', default=False,
+                        help='Enable FP16 mixed precision (fallback when BF16 unsupported)')
     parser.add_argument('--atom', type=int, default=0,
                         help='Initial atom count (0=auto)')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
@@ -537,6 +633,19 @@ if __name__ == '__main__':
                         help='Diffusion step size alpha (default: 0.5)')
     parser.add_argument('--diff-t', type=int, default=2,
                         help='Diffusion iterations T (default: 2)')
+    # ── Direct cluster loss args (Path 1+3) ──
+    parser.add_argument('--use-infonce', action='store_true', default=False,
+                        help='Fall back to InfoNCE instead of direct cluster loss (for ablation)')
+    parser.add_argument('--w-direct', type=float, default=2.0,
+                        help='Direct cluster loss weight (default: 2.0)')
+    parser.add_argument('--sinkhorn-eps', type=float, default=0.1,
+                        help='Sinkhorn entropy regularization (default: 0.1)')
+    parser.add_argument('--sinkhorn-iters', type=int, default=50,
+                        help='Sinkhorn iterations (default: 50)')
+    parser.add_argument('--ent-weight', type=float, default=0.005,
+                        help='Entropy penalty weight for balanced clusters (default: 0.005)')
+    parser.add_argument('--num-objects', type=int, default=2,
+                        help='Number of objects in synthetic scene (default: 2)')
     parser.add_argument('--quick', action='store_true', default=False,
                         help='Force quick mode (no visualizations)')
     parser.add_argument('--seed', type=int, default=42,
@@ -554,11 +663,11 @@ if __name__ == '__main__':
     num_atoms = args.atom if args.atom > 0 else (100 if is_64 else 200)
     # Phase 2: 覆盖率验证需要更早期开始（64×64 时 ~40%）
     phase2_start = int(num_epochs * 0.4) if is_64 else (num_epochs * 2 // 5)
-    num_samples = args.samples if args.samples > 0 else (64 if is_64 else 128)
+    num_samples = args.samples if args.samples > 0 else (64 if is_64 else 96)
     seed_every = 25 if is_64 else 25
-    
+
     output_dir = args.output if args.output else f'outputs/2d_{H}x{W}{"_bf16" if args.bf16 else ""}_v2'
-    render_chunk_size = args.chunk_size if args.chunk_size > 0 else (4096 if H >= 128 else W * H)
+    render_chunk_size = args.chunk_size if args.chunk_size > 0 else (2048 if H >= 128 else W * H)
     
     # 使用默认 dtype (FP32)，通过 autocast 在 forward 时转换为 BF16
     
@@ -573,6 +682,10 @@ if __name__ == '__main__':
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     bf16_enabled = args.bf16 and device == 'cuda' and torch.cuda.is_bf16_supported()
+    # 如果 BF16 不支持但请求了混合精度，自动用 FP16
+    if not bf16_enabled and args.bf16 and device == 'cuda':
+        args.fp16 = True
+    fp16_enabled = args.fp16 and device == 'cuda'
     
     if device == 'cuda':
         gpu_name = torch.cuda.get_device_name(0)
@@ -593,11 +706,13 @@ if __name__ == '__main__':
         num_atoms=num_atoms,
         num_epochs=num_epochs,
         num_views=8,
+        num_objects=args.num_objects,
         phase2_start=phase2_start,
         lr=args.lr,
         device=device,
         output_dir=output_dir,
         bf16=bf16_enabled,
+        fp16=fp16_enabled,
         num_samples=num_samples,
         seed_every=seed_every,
         render_chunk_size=render_chunk_size,
@@ -615,6 +730,12 @@ if __name__ == '__main__':
         diff_K=args.diff_k,
         diff_alpha=args.diff_alpha,
         diff_T=args.diff_t,
+        # Direct cluster loss hyperparams (Path 1+3)
+        use_direct_loss=not args.use_infonce,
+        w_direct=args.w_direct,
+        sinkhorn_eps=args.sinkhorn_eps,
+        sinkhorn_iters=args.sinkhorn_iters,
+        ent_weight=args.ent_weight,
         # Seed
         seed=args.seed,
     )

@@ -6,9 +6,13 @@ Usage:
     python scripts/grid_search.py --phase 1 --dry-run  # Preview configs only
 
 Phases:
-    1: w_met × w_vol balance (4×4 = 16 runs)
+    1: w_met × w_vol balance (4×4 = 16 runs) [InfoNCE baseline]
+    1.5: w_vol sweet zone scan (0.05~0.15, 5 runs)
     2: w_coh × tau sweep (16 runs)
     3: diff_K sweep (4 runs)
+    4: Direct cluster loss — w_direct × sinkhorn_eps sweep (4×5 = 20 runs)
+    4.5: Direct cluster loss — w_vol fine scan around best config
+    5: Direct cluster loss — w_met × w_vol validation sweep
 """
 
 import sys
@@ -37,13 +41,61 @@ PHASE1 = {
     'diff_K': [5],
 }
 
+PHASE1_5 = {
+    # w_vol sweet zone scan around optimal 0.1
+    'w_vol': [0.05, 0.075, 0.1, 0.125, 0.15],
+    # fixed to best found: w_met=0.005
+    'w_met': [0.005],
+    'w_coh': [2.0],
+    'tau': [0.5],
+    'diff_K': [5],
+}
+
 PHASE2 = {
+    # Fixed to best found from Phase 1 + 1.5
+    'w_met': [0.005],
+    'w_vol': [0.1],
+    # Search space: w_coh × tau (4×4 = 16 runs)
     'w_coh': [0.5, 1.0, 2.0, 5.0],
     'tau': [0.3, 0.5, 0.7, 1.0],
+    'diff_K': [5],
 }
 
 PHASE3 = {
     'diff_K': [3, 5, 10, 20],
+}
+
+# ── Direct Cluster Loss search spaces (Path 1+3) ──
+
+PHASE4 = {
+    # w_direct × sinkhorn_eps sweep
+    # Fixed: w_met=0.005, w_vol=0.1 (best from Phase 1)
+    'w_met': [0.005],
+    'w_vol': [0.1],
+    'w_direct': [0.5, 1.0, 2.0, 5.0],
+    'sinkhorn_eps': [0.05, 0.1, 0.2, 0.35, 0.5],
+    'ent_weight': [0.005],
+    'diff_K': [5],
+}
+
+PHASE4_5 = {
+    # w_vol fine scan with best direct loss config
+    'w_met': [0.005],
+    'w_vol': [0.05, 0.075, 0.1, 0.125, 0.15, 0.2],
+    'w_direct': [2.0],
+    'sinkhorn_eps': [0.1],
+    'ent_weight': [0.005],
+    'diff_K': [5],
+}
+
+PHASE5 = {
+    # w_met × w_vol re-validation with direct loss
+    'w_met': [0.002, 0.005, 0.01, 0.02],
+    'w_vol': [0.05, 0.1, 0.2, 0.5],
+    'w_direct': [2.0],
+    'sinkhorn_eps': [0.1],
+    'ent_weight': [0.005],
+    'diff_K': [5],
 }
 
 BASE_DIR = Path('outputs/grid_search')
@@ -65,7 +117,8 @@ def build_configs(search_space):
 def config_to_tag(config):
     """Short tag for output directory."""
     parts = []
-    for k in ('w_met', 'w_vol', 'w_coh', 'tau', 'diff_K'):
+    for k in ('w_met', 'w_vol', 'w_coh', 'w_direct', 'tau', 'diff_K',
+              'sinkhorn_eps', 'ent_weight'):
         if k in config:
             v = config[k]
             if isinstance(v, float):
@@ -75,7 +128,7 @@ def config_to_tag(config):
     return "_".join(parts)
 
 
-def run_trial(config, trial_id, phase):
+def run_trial(config, trial_id, phase, use_direct_loss=True):
     """Run a single trial and return metrics dict."""
     tag = config_to_tag(config)
     output_dir = BASE_DIR / f"phase{phase}" / tag
@@ -91,6 +144,11 @@ def run_trial(config, trial_id, phase):
         # Default fixed hyperparams
         'w_pos': 5.0, 'pos_thresh': 0.3, 'neg_thresh': 2.0, 'var_weight': 0.1,
         'diff_alpha': 0.5, 'diff_T': 2,
+        # Direct cluster loss (Path 1+3) — defaults
+        'use_direct_loss': use_direct_loss, 'w_direct': 2.0,
+        'sinkhorn_eps': 0.1, 'sinkhorn_iters': 50, 'ent_weight': 0.005,
+        # InfoNCE params (fallback when use_direct_loss=False)
+        'tau': 0.5, 'w_coh': 2.0,
         'seed': 42,
     }
 
@@ -185,7 +243,8 @@ def print_summary(results):
     for i, r in enumerate(valid[:10]):
         config_str = " ".join(
             f"{k}={r[k]}"
-            for k in ('w_met', 'w_vol', 'w_coh', 'tau', 'diff_K')
+            for k in ('w_met', 'w_vol', 'w_coh', 'w_direct', 'tau',
+                       'diff_K', 'sinkhorn_eps', 'ent_weight')
             if k in r
         )
         print(
@@ -199,8 +258,9 @@ def main():
 
     parser = argparse.ArgumentParser(description='Grid Search for MetricAtom')
     parser.add_argument(
-        '--phase', type=int, default=1, choices=[1, 2, 3],
-        help='Search phase (default: 1)'
+        '--phase', type=float, default=1, choices=[1, 1.5, 2, 3, 4, 4.5, 5],
+        help='Search phase: 1=w_met×w_vol, 1.5=w_vol sweet, 2=w_coh×tau, '
+             '3=diff_K, 4=w_direct×eps, 4.5=w_vol fine, 5=w_met×w_vol re-val'
     )
     parser.add_argument(
         '--dry-run', action='store_true',
@@ -212,10 +272,22 @@ def main():
     )
     args = parser.parse_args()
 
-    search_space = {1: PHASE1, 2: PHASE2, 3: PHASE3}[args.phase]
+    # Handle phase 1.5/4.5 (float keys)
+    if args.phase in (1.5, 4.5):
+        phase_key = args.phase
+    else:
+        phase_key = int(args.phase)
+    search_space = {
+        1: PHASE1, 1.5: PHASE1_5, 2: PHASE2, 3: PHASE3,
+        4: PHASE4, 4.5: PHASE4_5, 5: PHASE5,
+    }[phase_key]
+    # Phase 4+ uses direct cluster loss; 1-3 use InfoNCE
+    use_direct = phase_key in (4, 4.5, 5)
+
     configs = build_configs(search_space)
 
-    print(f"Phase {args.phase} grid search: {len(configs)} configurations")
+    loss_type = "DirectCluster" if use_direct else "InfoNCE"
+    print(f"Phase {args.phase} grid search: {len(configs)} configurations [{loss_type}]")
     print(f"Device: {DEVICE}  BF16: {BF16}")
     print(f"Each trial: 64×64, 500 epochs, quick mode (~3 min each)")
     print(f"Estimated total: ~{len(configs) * 3} min")
@@ -245,7 +317,7 @@ def main():
             continue
 
         trial_id = i + 1
-        result = run_trial(config, trial_id, args.phase)
+        result = run_trial(config, trial_id, args.phase, use_direct_loss=use_direct)
         results.append(result)
         save_results(results, args.phase)
 

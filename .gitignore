@@ -13,3 +13,6 @@ build/
 .idea/
 paper/
 .opencode/
+.claude/
+.omc/
+scripts/ssh_askpass.sh
