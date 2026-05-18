@@ -28,8 +28,8 @@ cleanup
 sleep 2
 
 echo "===== [4/4] 128x128 (T4 16GB, chunked) ====="
-$PYTHON train_2d.py --resolution 128 --epochs 800 --num-samples 64 \
-  $HPS --seed 42 --chunk-size 2048 --output $OUTDIR/128x128 2>&1 | \
+$PYTHON train_2d.py --resolution 128 --epochs 800 \
+  $HPS --seed 42 --samples 64 --chunk-size 2048 --output $OUTDIR/128x128 2>&1 | \
   tee $OUTDIR/128x128.log
 cleanup
 
