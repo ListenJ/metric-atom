@@ -1,0 +1,55 @@
+GPU: Tesla T4 (15.6 GB)
+CUDA: 12.4  |  cuDNN: 90100
+BF16: Enabled
+Resolution: 64x64  |  Atoms: 100  |  Epochs: 200
+Phase 2 start: 80  |  Samples: 64
+LR: 0.001  |  Chunk: 4096  |  Output: outputs/landscape/seed106
+[AMP] BF16 混合精度
+[1/5] 生成合成数据 (64x64, 8 视角)...
+[2/5] 初始化度量场 (64x64) + 100 个原子...
+  [Init] 全部 100 个原子初始化在物体区域 (occupancy引导)
+[3/5] 预计算光线...
+[4/5] 开始训练 (200 epochs, Phase 2 @ epoch 80)...
+       Prune every 20, Seed every 15, Protection=100
+  [   0/200|P1] T= 11.494 R=5.876 M=0.000 V=5.603 C=0.000 P=0.0150 A=100 FS=0.0989
+  [Seed] +12 (score-based, μ_score=1.359, dens=16.2)
+  [DirectCluster] Prototypes init from KMeans: [65, 47] atoms per cluster
+  [Prune] -5 (prot=100, thresh=18.71, contrib_m=173.63)
+  [Prune] -5 (prot=100, thresh=17.44, contrib_m=187.83)
+  [Seed] +12 (score-based, μ_score=0.238, dens=16.1)
+  [Prune] -5 (prot=100, thresh=18.68, contrib_m=212.67)
+  [Prune] -5 (prot=100, thresh=25.80, contrib_m=230.15)
+  [Prune] -5 (prot=100, thresh=35.12, contrib_m=247.66)
+  [Seed] +12 (score-based, μ_score=0.515, dens=16.9)
+  [ 199/200|P2] T=  5.390 R=0.463 M=0.000 V=4.354 C=0.193 D=0.0016 P=0.1864 B=1.00 A=111 FS=0.0606
+[5/5] 训练完成。保存模型并评估...
+
+============================================================
+MetricAtom 2D Evaluation Report
+============================================================
+
+[1] Clustering Evaluation:
+    ARI: 0.0320
+    NMI: 0.0571
+    Valid atoms (in objects): 73/111
+
+[2] Atom Statistics:
+    Active atoms (eps > 0.1): 111/111
+    Mean position: (0.809, 0.470)
+    Position std: (0.212, 0.151)
+
+[3] Metric Field Statistics:
+    Trace mean: 2.8188
+    Trace std: 0.4208
+    Trace min/max: 1.0036 / 3.1883
+
+[4] Final Losses (epoch 199):
+    Total:  5.3902
+    Render: 0.4629
+    Metric: 0.0001
+    OccVol: 4.3539
+    Cohere: 0.1935
+
+[5] Generating visualizations...
+    All visualizations saved to outputs/landscape/seed106/final/
+============================================================

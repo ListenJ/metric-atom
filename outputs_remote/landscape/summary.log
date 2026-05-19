@@ -1,0 +1,59 @@
+===== seed 100 =====
+    ARI: 0.1735
+    NMI: 0.3201
+    Valid atoms (in objects): 67/111
+===== seed 101 =====
+    ARI: -0.0048
+    NMI: 0.0018
+    Valid atoms (in objects): 73/111
+===== seed 102 =====
+    ARI: 0.6939
+    NMI: 0.6563
+    Valid atoms (in objects): 61/111
+===== seed 103 =====
+    ARI: 0.7784
+    NMI: 0.6931
+    Valid atoms (in objects): 86/111
+===== seed 104 =====
+    ARI: 0.5911
+    NMI: 0.4951
+    Valid atoms (in objects): 88/111
+===== seed 105 =====
+    ARI: 0.1010
+    NMI: 0.1998
+    Valid atoms (in objects): 66/111
+===== seed 106 =====
+    ARI: 0.0320
+    NMI: 0.0571
+    Valid atoms (in objects): 73/111
+===== seed 107 =====
+    ARI: 1.0000
+    NMI: 1.0000
+    Valid atoms (in objects): 50/111
+===== ALL DONE =====
+
+=== FINAL RESULTS ===
+    ARI: 0.1735
+    NMI: 0.3201
+    Valid atoms (in objects): 67/111
+    ARI: -0.0048
+    NMI: 0.0018
+    Valid atoms (in objects): 73/111
+    ARI: 0.6939
+    NMI: 0.6563
+    Valid atoms (in objects): 61/111
+    ARI: 0.7784
+    NMI: 0.6931
+    Valid atoms (in objects): 86/111
+    ARI: 0.5911
+    NMI: 0.4951
+    Valid atoms (in objects): 88/111
+    ARI: 0.1010
+    NMI: 0.1998
+    Valid atoms (in objects): 66/111
+    ARI: 0.0320
+    NMI: 0.0571
+    Valid atoms (in objects): 73/111
+    ARI: 1.0000
+    NMI: 1.0000
+    Valid atoms (in objects): 50/111

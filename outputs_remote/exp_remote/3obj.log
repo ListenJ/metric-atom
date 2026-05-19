@@ -1,0 +1,64 @@
+GPU: Tesla T4 (15.6 GB)
+CUDA: 12.4  |  cuDNN: 90100
+BF16: Enabled
+Resolution: 64x64  |  Atoms: 100  |  Epochs: 500
+Phase 2 start: 200  |  Samples: 64
+LR: 0.001  |  Chunk: 4096  |  Output: outputs/exp_remote/3obj
+[AMP] BF16 混合精度
+[1/5] 生成合成数据 (64x64, 8 视角)...
+[2/5] 初始化度量场 (64x64) + 100 个原子...
+  [Init] 全部 100 个原子初始化在物体区域 (occupancy引导)
+[3/5] 预计算光线...
+[4/5] 开始训练 (500 epochs, Phase 2 @ epoch 200)...
+       Prune every 33, Seed every 15, Protection=100
+  [   0/500|P1] T= 10.649 R=4.962 M=0.000 V=5.663 C=0.000 P=0.0240 A=100 FS=0.0998
+  [Prune] -5 (prot=100, thresh=2.90, contrib_m=159.81)
+  [Prune] -5 (prot=100, thresh=3.86, contrib_m=190.98)
+  [Seed] +12 (score-based, μ_score=0.444, dens=17.8)
+  [Prune] -5 (prot=100, thresh=23.42, contrib_m=206.88)
+  [DirectCluster] Prototypes init from KMeans: [46, 19, 32] atoms per cluster
+  [ 200/500|P2] T=  6.473 R=0.355 M=0.000 V=4.481 C=0.694 D=0.0058 P=0.2488 B=1.00 A=97 FS=0.0527
+  [Prune] -5 (prot=100, thresh=127.34, contrib_m=247.95)
+  [Prune] -4 (prot=100, thresh=153.57, contrib_m=280.78)
+  [Prune] -5 (prot=100, thresh=142.33, contrib_m=332.06)
+  [Prune] -5 (prot=100, thresh=153.18, contrib_m=400.74)
+  [Seed] +12 (score-based, μ_score=0.341, dens=19.7)
+  [Prune] -4 (prot=100, thresh=172.16, contrib_m=377.87)
+  [Prune] -4 (prot=100, thresh=179.39, contrib_m=405.78)
+  [ 400/500|P2] T=  4.392 R=0.259 M=0.001 V=3.521 C=0.238 D=0.0012 P=0.1340 B=1.00 A=82 FS=0.0689
+  [Prune] -4 (prot=100, thresh=214.09, contrib_m=435.00)
+  [Prune] -4 (prot=100, thresh=123.20, contrib_m=458.17)
+  [Prune] -4 (prot=100, thresh=162.95, contrib_m=496.37)
+  [Seed] +12 (score-based, μ_score=0.060, dens=19.6)
+  [ 499/500|P2] T=  4.256 R=0.418 M=0.001 V=3.246 C=0.243 D=0.0020 P=0.1050 B=1.00 A=82 FS=0.0689
+[5/5] 训练完成。保存模型并评估...
+
+============================================================
+MetricAtom 2D Evaluation Report
+============================================================
+
+[1] Clustering Evaluation:
+    ARI: 0.1755
+    NMI: 0.1928
+    Valid atoms (in objects): 66/82
+
+[2] Atom Statistics:
+    Active atoms (eps > 0.1): 82/82
+    Mean position: (0.426, 0.458)
+    Position std: (0.166, 0.126)
+
+[3] Metric Field Statistics:
+    Trace mean: 3.7164
+    Trace std: 0.9144
+    Trace min/max: 0.4158 / 4.6285
+
+[4] Final Losses (epoch 499):
+    Total:  4.2564
+    Render: 0.4179
+    Metric: 0.0007
+    OccVol: 3.2465
+    Cohere: 0.2432
+
+[5] Generating visualizations...
+    All visualizations saved to outputs/exp_remote/3obj/final/
+============================================================
