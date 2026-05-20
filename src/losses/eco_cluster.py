@@ -123,6 +123,48 @@ def identity_consistency_loss(j_current: torch.Tensor, j_initial: torch.Tensor) 
 
 
 # ---------------------------------------------------------------------------
+# Phase 8: Discriminant barrier + j-space separation
+# ---------------------------------------------------------------------------
+
+def discriminant_barrier_loss(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+    """
+    Log barrier: penalize Δ = 4a^3 + 27b^2 → 0 (singular curves).
+
+    When Δ→0, the j-invariant denominator → 0, causing gradient explosion and
+    subsequent feature collapse. This barrier turns the singular locus into a
+    repulsive wall instead of an attractor.
+
+    L_barrier = -mean(log(|Δ| + ε))
+    """
+    delta = 4.0 * a ** 3 + 27.0 * b ** 2
+    return -torch.log(torch.abs(delta) + eps).mean()
+
+
+def j_space_separation_loss(j_atoms: torch.Tensor, min_dist: float = 0.1) -> torch.Tensor:
+    """
+    Repulsive force in j-space: prevent all atoms from collapsing to identical j.
+
+    When j-invariants collapse (σ_j → 0), the z-score normalization amplifies
+    noise and Sinkhorn has no discriminative signal. This loss pushes nearby
+    atoms apart in j-space, maintaining identity diversity.
+
+    L_sep = mean(clamp(min_dist - |j_i - j_k|, 0)^2)
+
+    Args:
+        j_atoms: (N,) per-atom j-invariants
+        min_dist: minimum allowed distance between any two atoms' j-invariants
+    """
+    N = j_atoms.shape[0]
+    if N < 2:
+        return torch.tensor(0.0, device=j_atoms.device)
+
+    dist = torch.abs(j_atoms.unsqueeze(0) - j_atoms.unsqueeze(1))  # (N, N)
+    mask = 1.0 - torch.eye(N, device=j_atoms.device)
+    repulsion = torch.clamp(min_dist - dist, min=0.0) ** 2
+    return (repulsion * mask).sum() / (N * (N - 1) + 1e-10)
+
+
+# ---------------------------------------------------------------------------
 # ECO Cluster Loss (direct j-proto parameters)
 # ---------------------------------------------------------------------------
 
@@ -153,6 +195,10 @@ class ECOClusterLoss(nn.Module):
         self.ent_weight = ent_weight
         self.id_weight = id_weight
 
+        # Phase 8: discriminant barrier + j-separation
+        self.barrier_weight = 0.0
+        self.sep_weight = 0.0
+
         # Sinkhorn temperature annealing: start high (soft), anneal to sinkhorn_eps
         self.sinkhorn_eps_start = 1.0  # soft assignments during exploration
         self.register_buffer('eps_current', torch.tensor(sinkhorn_eps))
@@ -168,9 +214,40 @@ class ECOClusterLoss(nn.Module):
         self._j_initialized = False
 
     def compute_j_invariants(self, features: torch.Tensor) -> torch.Tensor:
-        """Map features to raw j-invariants via sensing function."""
+        """Map features to z-scored j-invariants via sensing function."""
         a, b = self.sensing(features)
         return j_invariant_from_ab(a, b)
+
+    def compute_raw_j(self, features: torch.Tensor) -> torch.Tensor:
+        """Raw (pre-z-score) j-invariants for Phase 8 monitoring."""
+        a, b = self.sensing(features)
+        a3 = 4.0 * a ** 3
+        b2 = 27.0 * b ** 2
+        return 1728.0 * a3 / (a3 + b2).clamp(min=1e-10)
+
+    def collapse_detected(self, features: torch.Tensor, threshold: float = 0.02) -> bool:
+        """Phase 8: feature std collapse (not j, since z-score masks j variance)."""
+        return features.shape[0] >= 2 and features.std(dim=0).mean().item() < threshold
+
+    def orthogonal_mutation(self, noise_scale: float = 0.3) -> bool:
+        """
+        Therapy 3: discrete manifold jump orthogonal to gradient.
+        Projects noise onto orthogonal complement of ∇L, then adds to φ weights.
+        Breaks deadlock without corrupting existing gradient signal.
+        """
+        last_layer = self.sensing.net[4]
+        if last_layer.weight.grad is None:
+            return False
+        with torch.no_grad():
+            grad = last_layer.weight.grad
+            noise = torch.randn_like(grad)
+            gn = grad.norm()
+            if gn > 1e-8:
+                proj = (noise * grad).sum() / (gn ** 2) * grad
+                noise = noise - proj  # ⟂ to grad
+            last_layer.weight.data += noise_scale * noise
+            last_layer.bias.data += noise_scale * torch.randn_like(last_layer.bias)
+        return True
 
     def init_prototypes(self, features: torch.Tensor, labels: torch.Tensor):
         """Initialize prototypes from KMeans labels and store initial j-invariants."""
@@ -188,6 +265,11 @@ class ECOClusterLoss(nn.Module):
     def set_progress(self, progress: float):
         """Annealing: progress=0→soft(eps=1.0), progress=1→hard(eps=target)."""
         self.eps_current[()] = self.sinkhorn_eps_start + progress * (self.sinkhorn_eps - self.sinkhorn_eps_start)
+
+    def set_barrier_sep(self, barrier_weight: float = 0.0, sep_weight: float = 0.0):
+        """Set Phase 8 defense weights (callable after construction)."""
+        self.barrier_weight = barrier_weight
+        self.sep_weight = sep_weight
 
     def forward(
         self,
@@ -241,6 +323,23 @@ class ECOClusterLoss(nn.Module):
         loss_id = identity_consistency_loss(j_protos, self.j_initial)
         loss = loss + self.id_weight * loss_id
 
+        # ── 7. Phase 8: discriminant barrier (prevent singular curves) ──
+        if self.barrier_weight > 0 and features.shape[0] > 0:
+            atom_a, atom_b = self.sensing(features)
+            loss_barrier = discriminant_barrier_loss(atom_a, atom_b)
+            loss = loss + self.barrier_weight * loss_barrier
+        else:
+            loss_barrier = torch.tensor(0.0, device=device)
+
+        # ── 8. Phase 8: j-space separation on RAW (pre-z-score) j-invariants ──
+        # z-scored j always has σ≈1, masking collapse. Raw j reveals true collapse.
+        if self.sep_weight > 0 and features.shape[0] > 1:
+            raw_j = self.compute_raw_j(features)
+            loss_sep = j_space_separation_loss(raw_j, min_dist=10.0)  # raw j spans ~hundreds
+            loss = loss + self.sep_weight * loss_sep
+        else:
+            loss_sep = torch.tensor(0.0, device=device)
+
         # ── Debug metrics ──
         cluster_sizes = P.sum(dim=0).detach()
 
@@ -254,6 +353,8 @@ class ECOClusterLoss(nn.Module):
             'j_initial': self.j_initial.detach().float().cpu().numpy(),
             'j_drift': (j_protos - self.j_initial).abs().mean().item(),
             'loss_id': loss_id.item(),
+            'loss_barrier': loss_barrier.item(),
+            'loss_sep': loss_sep.item(),
         }
 
         return loss, P, metrics

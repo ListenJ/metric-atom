@@ -220,6 +220,8 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                 # ECO cluster loss hyperparameters (Phase 6b)
                 use_eco=False, w_eco=0.5, eco_sinkhorn_eps=0.5, eco_sinkhorn_iters=50,
                 eco_ent_weight=0.005, eco_id_weight=0.1,
+                # Phase 8: discriminant barrier + j-separation
+                barrier_weight=0.0, sep_weight=0.0,
                 # Random seed
                 seed=42):
     """完整训练流程 — 支持 64x64 快速验证和 128x128 训练"""
@@ -276,8 +278,9 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
             sinkhorn_eps=eco_sinkhorn_eps, sinkhorn_iters=eco_sinkhorn_iters,
             ent_weight=eco_ent_weight, id_weight=eco_id_weight,
         ).to(device)
+        eco_cluster.set_barrier_sep(barrier_weight, sep_weight)
         eco_initialized = False
-        print(f"[ECO] ECO 正则化已启用 (id_weight={eco_id_weight})")
+        print(f"[ECO] ECO 正则化已启用 (id_weight={eco_id_weight}, barrier={barrier_weight}, sep={sep_weight})")
     else:
         eco_cluster = None
         eco_initialized = True
@@ -492,6 +495,13 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                     loss_eco, P_eco, eco_metrics = eco_cluster(
                         mus, metric_field, cluster_feats
                     )
+
+                    # ── Phase 8: collapse detection + orthogonal mutation ──
+                    if barrier_weight > 0 or sep_weight > 0:
+                        if epoch < phase2_start + 20 and eco_cluster.collapse_detected(cluster_feats, threshold=0.02):
+                            mutated = eco_cluster.orthogonal_mutation(noise_scale=0.3)
+                            if mutated:
+                                print(f"  [Phase 8] Orthogonal mutation at epoch {epoch} (feature collapse)")
                     j_drift_val = eco_metrics.get('j_drift', 0.0)
                     loss_eco_reg = loss_eco * w_eco
 
@@ -780,6 +790,11 @@ if __name__ == '__main__':
                         help='ECO entropy penalty weight (default: 0.005)')
     parser.add_argument('--eco-id-weight', type=float, default=0.1,
                         help='ECO j-invariant identity consistency weight (default: 0.1)')
+    # ── Phase 8: discriminant barrier + j-separation ──
+    parser.add_argument('--w-barrier', type=float, default=0.0,
+                        help='Discriminant barrier loss weight (Phase 8, default: 0.0)')
+    parser.add_argument('--w-separation', type=float, default=0.0,
+                        help='j-space separation loss weight (Phase 8, default: 0.0)')
     parser.add_argument('--num-objects', type=int, default=2,
                         help='Number of objects in synthetic scene (default: 2)')
     parser.add_argument('--quick', action='store_true', default=False,
@@ -879,6 +894,9 @@ if __name__ == '__main__':
         eco_sinkhorn_iters=args.eco_sinkhorn_iters,
         eco_ent_weight=args.eco_ent_weight,
         eco_id_weight=args.eco_id_weight,
+        # Phase 8: discriminant barrier + j-separation
+        barrier_weight=args.w_barrier,
+        sep_weight=args.w_separation,
         # Seed
         seed=args.seed,
     )
