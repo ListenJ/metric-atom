@@ -361,11 +361,11 @@ class ECOClusterLoss(nn.Module):
             'cluster_balance': (cluster_sizes.min() / cluster_sizes.max().clamp(min=1)).item(),
             'row_entropy': row_ent.item(),
             'P_max_mean': P.max(dim=1)[0].mean().item(),
-            'j_current': j_cur.detach().cpu().numpy(),
-            'j_initial': self.j_initial.detach().cpu().numpy(),
+            'j_current': j_cur.detach().float().cpu().numpy(),
+            'j_initial': self.j_initial.detach().float().cpu().numpy(),
             'j_drift': (j_cur - self.j_initial).abs().mean().item(),
-            'curve_a': a.detach().cpu().numpy(),
-            'curve_b': b.detach().cpu().numpy(),
+            'curve_a': a.detach().float().cpu().numpy(),
+            'curve_b': b.detach().float().cpu().numpy(),
         }
 
         return loss, P, metrics
