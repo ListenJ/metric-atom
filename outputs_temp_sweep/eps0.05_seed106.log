@@ -1,0 +1,56 @@
+GPU: Tesla T4 (15.6 GB)
+CUDA: 12.4  |  cuDNN: 90100
+BF16: Enabled
+Resolution: 64x64  |  Atoms: 100  |  Epochs: 200
+Phase 2 start: 80  |  Samples: 64
+LR: 0.001  |  Chunk: 4096  |  Output: outputs/temp_sweep/eps0.05_seed106
+[AMP] BF16 混合精度
+[1/5] 生成合成数据 (64x64, 8 视角)...
+[2/5] 初始化度量场 (64x64) + 100 个原子...
+  [Init] 全部 100 个原子初始化在物体区域 (occupancy引导)
+[ECO] ECO 正则化已启用 (id_weight=0.1)
+[3/5] 预计算光线...
+[4/5] 开始训练 (200 epochs, Phase 2 @ epoch 80)...
+       Prune every 20, Seed every 15, Protection=100
+  [   0/200|P1] T= 17.097 R=5.876 M=0.000 V=11.206 C=0.000 P=0.0150 A=100 FS=0.0989
+  [Seed] +12 (score-based, μ_score=1.370, dens=16.3)
+  [ECO+Direct] Balanced init: [62, 50] atoms per cluster (b=0.81)
+  [Prune] -5 (prot=100, thresh=20.61, contrib_m=166.98)
+  [Prune] -5 (prot=100, thresh=20.33, contrib_m=181.90)
+  [Seed] +12 (score-based, μ_score=0.224, dens=16.4)
+  [Prune] -5 (prot=100, thresh=20.81, contrib_m=207.36)
+  [Prune] -5 (prot=100, thresh=25.88, contrib_m=220.04)
+  [Prune] -5 (prot=100, thresh=37.18, contrib_m=241.98)
+  [Seed] +12 (score-based, μ_score=0.496, dens=16.8)
+  [ 199/200|P2] T=  9.734 R=0.470 M=0.000 V=8.626 C=0.174 D=0.0022 P=0.1786 B=0.87 jD=0.0000 A=111 FS=0.0584
+[5/5] 训练完成。保存模型并评估...
+
+============================================================
+MetricAtom 2D Evaluation Report
+============================================================
+
+[1] Clustering Evaluation:
+    ARI: 0.0030
+    NMI: 0.1269
+    Valid atoms (in objects): 72/111
+
+[2] Atom Statistics:
+    Active atoms (eps > 0.1): 111/111
+    Mean position: (0.810, 0.477)
+    Position std: (0.222, 0.146)
+
+[3] Metric Field Statistics:
+    Trace mean: 2.8429
+    Trace std: 0.4221
+    Trace min/max: 1.0473 / 3.2060
+
+[4] Final Losses (epoch 199):
+    Total:  9.7339
+    Render: 0.4703
+    Metric: 0.0002
+    OccVol: 8.6261
+    Cohere: 0.1742
+
+[5] Generating visualizations...
+    All visualizations saved to outputs/temp_sweep/eps0.05_seed106/final/
+============================================================
