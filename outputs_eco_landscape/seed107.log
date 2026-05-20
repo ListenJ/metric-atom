@@ -15,14 +15,14 @@ LR: 0.001  |  Chunk: 4096  |  Output: outputs/eco_landscape/seed107
   [   0/200|P1] T= 17.547 R=4.887 M=0.000 V=12.581 C=0.000 P=0.0796 A=100 FS=0.0989
   [Seed] +12 (score-based, μ_score=2.427, dens=14.6)
   [ECO+Direct] Dual init from KMeans: [64, 48] atoms per cluster
-  [Prune] -5 (prot=100, thresh=18.42, contrib_m=140.53)
-  [Prune] -5 (prot=100, thresh=29.54, contrib_m=156.34)
-  [Seed] +12 (score-based, μ_score=0.399, dens=15.6)
-  [Prune] -5 (prot=100, thresh=35.72, contrib_m=161.01)
-  [Prune] -5 (prot=100, thresh=55.95, contrib_m=172.42)
-  [Prune] -5 (prot=100, thresh=70.38, contrib_m=184.82)
-  [Seed] +12 (score-based, μ_score=0.432, dens=15.9)
-  [ 199/200|P2] T= 11.733 R=0.538 M=0.000 V=10.119 C=0.221 D=0.0022 P=0.4195 B=0.98 jD=0.0347 A=111 FS=0.0577
+  [Prune] -5 (prot=100, thresh=22.17, contrib_m=144.93)
+  [Prune] -5 (prot=100, thresh=31.06, contrib_m=159.30)
+  [Seed] +12 (score-based, μ_score=0.368, dens=15.8)
+  [Prune] -5 (prot=100, thresh=41.74, contrib_m=164.40)
+  [Prune] -5 (prot=100, thresh=57.48, contrib_m=178.92)
+  [Prune] -5 (prot=100, thresh=77.32, contrib_m=193.14)
+  [Seed] +12 (score-based, μ_score=0.490, dens=16.2)
+  [ 199/200|P2] T= 11.511 R=0.451 M=0.000 V=9.986 C=0.232 D=0.0022 P=0.4399 B=1.00 jD=0.0000 A=111 FS=0.0567
 [5/5] 训练完成。保存模型并评估...
 
 ============================================================
@@ -30,26 +30,26 @@ MetricAtom 2D Evaluation Report
 ============================================================
 
 [1] Clustering Evaluation:
-    ARI: 1.0000
-    NMI: 1.0000
-    Valid atoms (in objects): 37/111
+    ARI: 0.9048
+    NMI: 0.8598
+    Valid atoms (in objects): 42/111
 
 [2] Atom Statistics:
     Active atoms (eps > 0.1): 111/111
-    Mean position: (0.519, 0.353)
-    Position std: (0.351, 0.146)
+    Mean position: (0.525, 0.366)
+    Position std: (0.356, 0.153)
 
 [3] Metric Field Statistics:
-    Trace mean: 2.8188
-    Trace std: 0.1998
-    Trace min/max: 1.2612 / 3.0821
+    Trace mean: 2.8654
+    Trace std: 0.2101
+    Trace min/max: 1.2257 / 3.1516
 
 [4] Final Losses (epoch 199):
-    Total:  11.7327
-    Render: 0.5385
+    Total:  11.5114
+    Render: 0.4506
     Metric: 0.0002
-    OccVol: 10.1193
-    Cohere: 0.2207
+    OccVol: 9.9865
+    Cohere: 0.2322
 
 [5] Generating visualizations...
     All visualizations saved to outputs/eco_landscape/seed107/final/

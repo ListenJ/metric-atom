@@ -34,21 +34,26 @@ def j_invariant_from_ab(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     j-invariant for elliptic curves: j = 1728 * 4a^3 / (4a^3 + 27b^2).
 
-    The discriminant Delta = -16(4a^3 + 27b^2) must be != 0 for non-singular
-    curves. We clamp the denominator to prevent division by zero.
+    Uses z-score normalization instead of tanh to preserve discriminability:
+    raw j-invariant values span hundreds, but tanh(j * 0.001) compresses
+    all values to [-0.3, 0.3]. Z-score normalization gives unit variance,
+    ensuring the Sinkhorn cost always spans a meaningful range while
+    preserving relative differences.
 
     Args:
         a, b: (...,) tensors of curve parameters
     Returns:
-        j: (...,) j-invariants, normalized to [-1, 1] via tanh normalization
+        j: (...,) j-invariants, z-score normalized (mean=0, std≈1)
     """
     a3 = 4.0 * a ** 3
     b2 = 27.0 * b ** 2
     denom = a3 + b2
     # Raw j-invariant (can be very large for near-singular curves)
     j_raw = 1728.0 * a3 / denom.clamp(min=1e-10)
-    # Normalize to [-1, 1] for stable gradient
-    j = torch.tanh(j_raw * 0.001)
+    # Z-score normalize for max discriminability
+    # This makes the Sinkhorn cost distribution consistently span [0, several stds]
+    j_centered = j_raw - j_raw.mean()
+    j = j_centered / (j_centered.std() + 1e-8)
     return j
 
 
@@ -76,13 +81,15 @@ class SensingFunction(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 2),  # (a, b)
         )
-        # Initialize to produce somewhat diverse outputs
+        # Initialize to produce diverse outputs
+        # Wider weights → more diverse (a,b) → more j-invariant diversity
         with torch.no_grad():
-            for layer in self.net:
-                if isinstance(layer, nn.Linear):
-                    layer.weight.data.normal_(0, 0.1)
-                    if hasattr(layer, 'bias') and layer.bias is not None:
-                        layer.bias.data.zero_()
+            self.net[0].weight.data.normal_(0, 0.15)
+            self.net[2].weight.data.normal_(0, 0.15)
+            # Last layer: wider to produce spread-out (a,b)
+            self.net[4].weight.data.normal_(0, 0.3)
+            self.net[4].bias.data[0] = -1.0   # a starts near -1
+            self.net[4].bias.data[1] = 0.5    # b starts near 0.5
 
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -136,10 +143,8 @@ def sinkhorn_jinv(
     K = j_protos.shape[0]
     device = j_atoms.device
 
-    # Cost = |j_i - j_k|, normalized to [0, 1]
+    # Cost = |j_i - j_k| (j is z-score normalized, so cost is already in meaningful units)
     cost = torch.abs(j_atoms.unsqueeze(1) - j_protos.unsqueeze(0))  # (N, K)
-    # Normalize to prevent extreme values
-    cost = cost / (cost.max() + 1e-8)
 
     # Sinkhorn-Knopp
     K_mat = torch.exp(-cost / epsilon)  # (N, K)
@@ -341,6 +346,16 @@ class ECOClusterLoss(nn.Module):
 
         loss_id = identity_consistency_loss(j_protos, self.j_initial)
         loss = loss + self.id_weight * loss_id
+
+        # ── 6. j-diversity bonus (explicitly push clusters apart in j-space) ──
+        # Penalize clusters whose j-invariants are too close
+        pairwise_j = torch.abs(j_protos.unsqueeze(0) - j_protos.unsqueeze(1))  # (K, K)
+        # Mask out self-distances (diagonal)
+        mask = 1.0 - torch.eye(K, device=device)
+        min_pairwise = (pairwise_j * mask + 1e10 * (1.0 - mask)).view(-1).min()
+        # If any pair is closer than threshold, add penalty
+        if min_pairwise < self.j_diversity_min:
+            loss = loss + 0.05 * (self.j_diversity_min - min_pairwise)
 
         # ── Debug metrics ──
         cluster_sizes = P.sum(dim=0).detach()
