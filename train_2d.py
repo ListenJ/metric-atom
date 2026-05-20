@@ -13,6 +13,30 @@ from contextlib import nullcontext
 from torch.amp import GradScaler
 from scipy.ndimage import distance_transform_edt
 from sklearn.cluster import KMeans
+import warnings
+
+
+def balanced_kmeans(mus_np, n_clusters, random_state=42, max_attempts=20, min_balance=0.5):
+    """
+    Run KMeans with multiple seeds, pick the most balanced split.
+    min_balance = min(cluster_sizes) / max(cluster_sizes).
+    """
+    best_labels = None
+    best_balance = 0.0
+    for attempt in range(max_attempts):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            kmeans = KMeans(n_clusters=n_clusters, random_state=random_state + attempt * 7,
+                            n_init=3, max_iter=100)
+            labels = kmeans.fit_predict(mus_np)
+        counts = np.bincount(labels, minlength=n_clusters)
+        balance = counts.min() / counts.max()
+        if balance >= min_balance:
+            return labels, balance
+        if balance > best_balance:
+            best_balance = balance
+            best_labels = labels
+    return best_labels, best_balance
 
 from src.geometry.metric_field import MetricField2D
 from src.atoms.atom_2d import Atom2D
@@ -429,8 +453,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                     if epoch == phase2_start:
                         with torch.no_grad():
                             mus_np = mus.cpu().numpy()
-                            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-                            labels = kmeans.fit_predict(mus_np)
+                            labels, balance = balanced_kmeans(mus_np, n_clusters)
 
                             # Init DirectCluster prototypes
                             direct_cluster.init_prototypes(cluster_feats.detach(),
@@ -452,8 +475,8 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
 
                         direct_cluster_initialized = True
                         eco_initialized = True
-                        print(f"  [ECO+Direct] Dual init from KMeans: "
-                              f"{np.bincount(labels).tolist()} atoms per cluster")
+                        print(f"  [ECO+Direct] Balanced init: "
+                              f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
 
                     # ── DirectCluster: primary assignment signal ──
                     loss_direct, P, dc_metrics = direct_cluster(
@@ -464,6 +487,8 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                     loss_primary = loss_direct * w_direct
 
                     # ── ECO: j-invariant identity regularization ──
+                    eco_progress = min((epoch - phase2_start) / max(num_epochs - phase2_start, 1), 1.0)
+                    eco_cluster.set_progress(eco_progress)
                     loss_eco, P_eco, eco_metrics = eco_cluster(
                         mus, metric_field, cluster_feats
                     )
@@ -498,8 +523,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                     if epoch == phase2_start:
                         with torch.no_grad():
                             mus_np = mus.cpu().numpy()
-                            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-                            labels = kmeans.fit_predict(mus_np)
+                            labels, balance = balanced_kmeans(mus_np, n_clusters)
 
                             # 初始化特征原型
                             direct_cluster.init_prototypes(cluster_feats.detach(),
@@ -517,8 +541,8 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                                             a._feature.copy_(base + noise)
 
                         direct_cluster_initialized = True
-                        print(f"  [DirectCluster] Prototypes init from KMeans: "
-                              f"{np.bincount(labels).tolist()} atoms per cluster")
+                        print(f"  [DirectCluster] Balanced init: "
+                              f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
 
                     # Direct cluster loss: Sinkhorn assignment + geodesic compaction
                     loss_direct, P, dc_metrics = direct_cluster(
@@ -554,8 +578,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                         # KMeans 空间先验特征初始化
                         with torch.no_grad():
                             mus_np = mus.cpu().numpy()
-                            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-                            labels = kmeans.fit_predict(mus_np)
+                            labels, balance = balanced_kmeans(mus_np, n_clusters)
 
                             feat_dim = feats.shape[1]
                             cluster_centroids = []
@@ -568,8 +591,8 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                                 noise_small = torch.randn(feat_dim, device=device) * 0.05
                                 a._feature.copy_(cluster_centroids[c] + noise_small)
 
-                        print(f"  [KMeans] Spatial feature init: "
-                              f"{np.bincount(labels).tolist()} atoms per cluster")
+                        print(f"  [KMeans] Spatial balanced init: "
+                              f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
         
         # 正则化损失 backward（图和渲染损失的图已释放，显存充裕）
         scaler.scale(loss_reg).backward()
