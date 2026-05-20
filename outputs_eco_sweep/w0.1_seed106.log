@@ -1,0 +1,56 @@
+GPU: Tesla T4 (15.6 GB)
+CUDA: 12.4  |  cuDNN: 90100
+BF16: Enabled
+Resolution: 64x64  |  Atoms: 100  |  Epochs: 200
+Phase 2 start: 80  |  Samples: 64
+LR: 0.001  |  Chunk: 4096  |  Output: outputs/eco_sweep/w0.1_seed106
+[AMP] BF16 混合精度
+[1/5] 生成合成数据 (64x64, 8 视角)...
+[2/5] 初始化度量场 (64x64) + 100 个原子...
+  [Init] 全部 100 个原子初始化在物体区域 (occupancy引导)
+[ECO] ECO 正则化已启用 (id_weight=0.1)
+[3/5] 预计算光线...
+[4/5] 开始训练 (200 epochs, Phase 2 @ epoch 80)...
+       Prune every 20, Seed every 15, Protection=100
+  [   0/200|P1] T= 17.097 R=5.876 M=0.000 V=11.206 C=0.000 P=0.0150 A=100 FS=0.0989
+  [Seed] +12 (score-based, μ_score=1.370, dens=16.3)
+  [ECO+Direct] Dual init from KMeans: [61, 51] atoms per cluster
+  [Prune] -5 (prot=100, thresh=19.46, contrib_m=165.22)
+  [Prune] -5 (prot=100, thresh=18.41, contrib_m=179.50)
+  [Seed] +12 (score-based, μ_score=0.215, dens=16.3)
+  [Prune] -5 (prot=100, thresh=16.05, contrib_m=201.01)
+  [Prune] -5 (prot=100, thresh=17.79, contrib_m=215.06)
+  [Prune] -5 (prot=100, thresh=23.79, contrib_m=231.20)
+  [Seed] +12 (score-based, μ_score=0.480, dens=16.7)
+  [ 199/200|P2] T=  9.614 R=0.462 M=0.000 V=8.630 C=0.156 D=0.0021 P=0.1901 B=1.00 jD=0.0000 A=111 FS=0.0589
+[5/5] 训练完成。保存模型并评估...
+
+============================================================
+MetricAtom 2D Evaluation Report
+============================================================
+
+[1] Clustering Evaluation:
+    ARI: 0.0013
+    NMI: 0.0316
+    Valid atoms (in objects): 65/111
+
+[2] Atom Statistics:
+    Active atoms (eps > 0.1): 111/111
+    Mean position: (0.824, 0.473)
+    Position std: (0.243, 0.151)
+
+[3] Metric Field Statistics:
+    Trace mean: 2.8456
+    Trace std: 0.4110
+    Trace min/max: 1.0389 / 3.2057
+
+[4] Final Losses (epoch 199):
+    Total:  9.6142
+    Render: 0.4625
+    Metric: 0.0002
+    OccVol: 8.6300
+    Cohere: 0.1561
+
+[5] Generating visualizations...
+    All visualizations saved to outputs/eco_sweep/w0.1_seed106/final/
+============================================================

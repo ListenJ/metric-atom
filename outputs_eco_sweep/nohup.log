@@ -1,0 +1,161 @@
+================================================================
+W_ECO=0.1 START: Wed May 20 12:41:35 CST 2026
+================================================================
+  seed 100 start: Wed May 20 12:41:35 CST 2026
+  seed 100 result:     ARI: 0.5169
+  seed 101 start: Wed May 20 12:42:41 CST 2026
+  seed 101 result:     ARI: 0.7088
+  seed 102 start: Wed May 20 12:43:47 CST 2026
+  seed 102 result:     ARI: 0.5229
+  seed 103 start: Wed May 20 12:44:54 CST 2026
+  seed 103 result:     ARI: 0.8668
+  seed 104 start: Wed May 20 12:46:01 CST 2026
+  seed 104 result:     ARI: 0.5690
+  seed 105 start: Wed May 20 12:47:08 CST 2026
+  seed 105 result:     ARI: 0.1348
+  seed 106 start: Wed May 20 12:48:15 CST 2026
+  seed 106 result:     ARI: 0.0013
+  seed 107 start: Wed May 20 12:49:22 CST 2026
+  seed 107 result:     ARI: 1.0000
+
+=== W_ECO=0.1 SUMMARY ===
+  100:     ARI: 0.5169
+  101:     ARI: 0.7088
+  102:     ARI: 0.5229
+  103:     ARI: 0.8668
+  104:     ARI: 0.5690
+  105:     ARI: 0.1348
+  106:     ARI: 0.0013
+  107:     ARI: 1.0000
+
+================================================================
+W_ECO=0.3 START: Wed May 20 12:50:29 CST 2026
+================================================================
+  seed 100 start: Wed May 20 12:50:29 CST 2026
+  seed 100 result:     ARI: 0.5161
+  seed 101 start: Wed May 20 12:51:36 CST 2026
+  seed 101 result:     ARI: 0.6831
+  seed 102 start: Wed May 20 12:52:43 CST 2026
+  seed 102 result:     ARI: 0.4320
+  seed 103 start: Wed May 20 12:53:49 CST 2026
+  seed 103 result:     ARI: 0.9101
+  seed 104 start: Wed May 20 12:54:56 CST 2026
+  seed 104 result:     ARI: 0.5732
+  seed 105 start: Wed May 20 12:56:04 CST 2026
+  seed 105 result:     ARI: 0.1612
+  seed 106 start: Wed May 20 12:57:10 CST 2026
+  seed 106 result:     ARI: 0.0021
+  seed 107 start: Wed May 20 12:58:17 CST 2026
+  seed 107 result:     ARI: 1.0000
+
+=== W_ECO=0.3 SUMMARY ===
+  100:     ARI: 0.5161
+  101:     ARI: 0.6831
+  102:     ARI: 0.4320
+  103:     ARI: 0.9101
+  104:     ARI: 0.5732
+  105:     ARI: 0.1612
+  106:     ARI: 0.0021
+  107:     ARI: 1.0000
+
+================================================================
+W_ECO=0.5 START: Wed May 20 12:59:24 CST 2026
+================================================================
+  seed 100 start: Wed May 20 12:59:24 CST 2026
+  seed 100 result:     ARI: 0.4664
+  seed 101 start: Wed May 20 13:00:31 CST 2026
+  seed 101 result:     ARI: 0.6393
+  seed 102 start: Wed May 20 13:01:37 CST 2026
+  seed 102 result:     ARI: 0.4693
+  seed 103 start: Wed May 20 13:02:44 CST 2026
+  seed 103 result:     ARI: 0.8668
+  seed 104 start: Wed May 20 13:03:50 CST 2026
+  seed 104 result:     ARI: 0.5022
+  seed 105 start: Wed May 20 13:04:57 CST 2026
+  seed 105 result:     ARI: 0.5258
+  seed 106 start: Wed May 20 13:06:04 CST 2026
+  seed 106 result:     ARI: 0.0112
+  seed 107 start: Wed May 20 13:07:11 CST 2026
+  seed 107 result:     ARI: 0.9048
+
+=== W_ECO=0.5 SUMMARY ===
+  100:     ARI: 0.4664
+  101:     ARI: 0.6393
+  102:     ARI: 0.4693
+  103:     ARI: 0.8668
+  104:     ARI: 0.5022
+  105:     ARI: 0.5258
+  106:     ARI: 0.0112
+  107:     ARI: 0.9048
+
+================================================================
+W_ECO=1.0 START: Wed May 20 13:08:18 CST 2026
+================================================================
+  seed 100 start: Wed May 20 13:08:18 CST 2026
+  seed 100 result:     ARI: 0.9375
+  seed 101 start: Wed May 20 13:09:25 CST 2026
+  seed 101 result:     ARI: 0.7003
+  seed 102 start: Wed May 20 13:10:32 CST 2026
+  seed 102 result:     ARI: 0.5838
+  seed 103 start: Wed May 20 13:11:39 CST 2026
+  seed 103 result:     ARI: 0.9121
+  seed 104 start: Wed May 20 13:12:46 CST 2026
+  seed 104 result:     ARI: 0.5804
+  seed 105 start: Wed May 20 13:13:53 CST 2026
+  seed 105 result:     ARI: 0.3729
+  seed 106 start: Wed May 20 13:14:59 CST 2026
+  seed 106 result:     ARI: -0.0098
+  seed 107 start: Wed May 20 13:16:06 CST 2026
+  seed 107 result:     ARI: 0.8398
+
+=== W_ECO=1.0 SUMMARY ===
+  100:     ARI: 0.9375
+  101:     ARI: 0.7003
+  102:     ARI: 0.5838
+  103:     ARI: 0.9121
+  104:     ARI: 0.5804
+  105:     ARI: 0.3729
+  106:     ARI: -0.0098
+  107:     ARI: 0.8398
+
+================================================================
+ALL DONE: Wed May 20 13:17:13 CST 2026
+================================================================
+
+=== ECO WEIGHT SWEEP RESULTS ===
+--- w_eco=0.1 ---
+  100: 0.5169
+  101: 0.7088
+  102: 0.5229
+  103: 0.8668
+  104: 0.5690
+  105: 0.1348
+  106: 0.0013
+  107: 1.0000
+--- w_eco=0.3 ---
+  100: 0.5161
+  101: 0.6831
+  102: 0.4320
+  103: 0.9101
+  104: 0.5732
+  105: 0.1612
+  106: 0.0021
+  107: 1.0000
+--- w_eco=0.5 ---
+  100: 0.4664
+  101: 0.6393
+  102: 0.4693
+  103: 0.8668
+  104: 0.5022
+  105: 0.5258
+  106: 0.0112
+  107: 0.9048
+--- w_eco=1.0 ---
+  100: 0.9375
+  101: 0.7003
+  102: 0.5838
+  103: 0.9121
+  104: 0.5804
+  105: 0.3729
+  106: -0.0098
+  107: 0.8398
