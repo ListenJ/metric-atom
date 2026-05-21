@@ -473,7 +473,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                                     base = direct_cluster.prototypes[c].detach()
                                     for i, a in enumerate(atoms):
                                         if mask[i]:
-                                            noise = torch.randn(feat_dim, device=device) * 0.05
+                                            noise = torch.randn(feat_dim, device=device) * 0.15
                                             a._feature.copy_(base + noise)
 
                         direct_cluster_initialized = True
@@ -547,7 +547,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                                     base = direct_cluster.prototypes[c].detach()
                                     for i, a in enumerate(atoms):
                                         if mask[i]:
-                                            noise = torch.randn(feat_dim, device=device) * 0.05
+                                            noise = torch.randn(feat_dim, device=device) * 0.15
                                             a._feature.copy_(base + noise)
 
                         direct_cluster_initialized = True
@@ -613,7 +613,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
         torch.nn.utils.clip_grad_norm_(all_params, 1.0)
         scaler.step(optimizer)
         scaler.update()
-        
+
         # ── 剪枝和播种（在 autocast 外部） ──
         if do_prune:
             atoms, atom_birth_epochs = prune_atoms_contrib(

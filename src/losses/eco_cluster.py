@@ -250,15 +250,31 @@ class ECOClusterLoss(nn.Module):
         return True
 
     def init_prototypes(self, features: torch.Tensor, labels: torch.Tensor):
-        """Initialize prototypes from KMeans labels and store initial j-invariants."""
+        """Initialize prototypes with j-diversity enforcement."""
         with torch.no_grad():
             for k in range(self.n_clusters):
                 mask = labels == k
                 if mask.sum() > 0:
                     self.prototypes[k] = features[mask].mean(dim=0)
 
-            # Store initial j-invariants for identity tracking
+            # Enforce j-diversity: push prototype features apart if j too close
             j_protos = self.compute_j_invariants(self.prototypes)
+            for _ in range(20):
+                min_gap = float('inf')
+                argmin = None
+                for k1 in range(self.n_clusters):
+                    for k2 in range(k1 + 1, self.n_clusters):
+                        gap = (j_protos[k1] - j_protos[k2]).abs().item()
+                        if gap < min_gap:
+                            min_gap = gap
+                            argmin = (k1, k2)
+                if min_gap >= 0.3:
+                    break
+                k_push = argmin[1]
+                noise = torch.randn(self.feature_dim, device=self.prototypes.device) * 0.5
+                self.prototypes[k_push] += noise
+                j_protos = self.compute_j_invariants(self.prototypes)
+
             self.j_initial = j_protos.detach()
             self._j_initialized = True
 

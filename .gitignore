@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 outputs/
+outputs_*/
 *.pt
 *.pth
 notebooks/.ipynb_checkpoints/
@@ -16,3 +17,5 @@ paper/
 .claude/
 .omc/
 scripts/ssh_askpass.sh
+.pytest_cache/
+archive/
