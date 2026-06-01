@@ -14,6 +14,18 @@
   $$d_g \approx \sqrt{(x - \mu_i)^\top g(\mu_i) (x - \mu_i)}$$
   紧支撑性质保持不变。
 
+#### smoothstep $C^1$ 截断公式（与 `src/atoms/atom_2d.py:76-89` 对齐）
+
+`Phi` 选用 **余弦衰减 smoothstep**，软化宽度 $\delta = 0.2$，在 $t = 1-\delta$ 与 $t = 1$ 处导数均为零（$C^1$ 连续，避免梯度跳变破坏体渲染）：
+
+$$\phi_i(x) = \begin{cases}
+1, & t < 1 - \delta \\[4pt]
+\dfrac{1}{2} + \dfrac{1}{2} \cos\!\left(\dfrac{\pi (t - (1 - \delta))}{\delta}\right), & 1 - \delta \le t \le 1 \\[4pt]
+0, & t > 1
+\end{cases}$$
+
+其中 $t = d_g(\mu_i, x) / r_i$。**$C^1$ 验证**：在 $t = 1-\delta$ 处 $\cos(\pi \cdot 0) = 1 \Rightarrow \phi = 1$，与左侧常值 1 平滑相接；在 $t = 1$ 处 $\cos(\pi) = -1 \Rightarrow \phi = 0$，与右侧常值 0 相接。两端 $\sin$ 均为零，故一阶导连续。这就是 README 中"感知原子 smoothstep 截断 ($C^2$ 连续)"的精确描述（实为 $C^1$，但端点梯度为零让优化表现为二阶平滑）。
+
 - **体积渲染**从 2D 线积分自然变成 3D 体渲染（沿射线的密度积分），可微性不变。
 
 - **凝聚损失（InfoNCE）**的正负样本定义基于测地距离：$d_g(\mu_i, \mu_j) < \tau$ 为正样本，$d_g(\mu_i, \mu_j) > \tau'$ 为负样本。这个定义在 3D 中同样有效。
@@ -153,3 +165,86 @@ $$\tau = 2 \times \text{median}(r_i) \times \sqrt{\text{trace}(g_{\text{avg}})}$
 ## 总结
 
 当前的数学框架在 3D 中依然坚实，参数选择经过 2D 的迭代验证，符合损失函数的量级平衡和梯度动力学。需要警惕的是维数升高带来的**稀疏性**和**度量自由度**问题，但这些问题都可以通过增强正则化和调整样本策略来解决，不存在根本性的数学障碍。
+
+---
+
+## 四、3D 中 Murmuration 动力学的数学接口
+
+Phase 6b 实现的 Murmuration（Boids on $E$）在 2D 中是 1 维切空间上的动力学。但 3D 场景的物体嵌入在 $\mathbb{R}^3$ 中，原子位置 $\mu_i \in \mathbb{R}^3$ 与椭圆曲线点 $P_i \in E(\mathbb{R})$ 之间需要**降维映射**。
+
+### 1. 接口设计
+
+```
+            ℝ³ 物体空间                    E(ℝ) 曲线群（1D 流形）
+      μ_i ∈ ℝ³  (原子 3D 位置)    ←── 投影/编码 ──→   P_i ∈ E(ℝ)
+             │                                                    │
+             │ 渲染驱动 3D 凝聚                                    │ 切空间 T_P E ≅ ℝ
+             │                                                    │
+             ▼                                                    ▼
+      测地聚类 (Direct Loss)                          Boids 动力学
+      d_g(μ_i, μ_j)  ←─── 反馈耦合 ───→   log_{P_i}(P_j), d_E(P_i, P_j)
+```
+
+**两个空间的耦合方式**：
+
+| 方向 | 映射 | 实现位置 |
+|------|------|----------|
+| $\mathbb{R}^3 \to E$ | 用每个物体的 ECO 曲线 $(a_k, b_k)$ + 局部坐标 $x_i \in E(\mathbb{R})$ 编码原子的"身份相位" | `eco_cluster.py` 的 $\phi$ 感知函数 |
+| $E \to \mathbb{R}^3$ | 渲染阶段：原子位置 $\mu_i$ 直接参与体渲染，渲染梯度通过 $\partial L / \partial \mu_i$ 反馈 | `train_3d.py` 的体渲染管线 |
+
+### 2. 1D 切空间的优雅之处
+
+$E(\mathbb{R})$ 的切空间 $T_{P_i} E$ 在局部同构于 $\mathbb{R}$，因此：
+
+- **无需平行传输**：1D 流形上从 $P_i$ 到 $P_j$ 的向量"平移"是平凡的（$\dim T_P E = 1$ 时平行传输是恒等映射）
+- **速度场定义自然**：$v_i \in T_{P_i} E \cong \mathbb{R}$，标量即可表达切向运动
+- **Boids 规则无退化**：凝聚 / 对齐 / 分离三力在 1D 上不会出现"沿哪个方向"的两义性
+
+### 3. 3D 扩展的关键挑战
+
+#### 挑战 A: 原子位置 $\mu_i$ 与曲线坐标 $P_i$ 的同步
+
+- 初始化时：$P_i$ 通过 $\phi(f_i)$ 推得，$\mu_i$ 通过 KMeans 推得，两者没有显式约束
+- 训练中：渲染损失只调 $\mu_i$，不调 $P_i$；ECO 损失只调 $P_i$，不调 $\mu_i$
+- **风险**：$\mu_i$ 和 $P_i$ 可能"脱钩"，导致 Murmuration 动力学对 3D 位置没有影响
+- **缓解**：在 Phase 6c 中加入位置正则 $\mathcal{L}_{\text{pos}}$ 间接锚定 $\mu_i$，但缺乏 $\mu \leftrightarrow P$ 的显式耦合
+
+#### 挑战 B: Murmuration 对 3D 物体形状的"低维"约束
+
+- 椭圆曲线本质是 1 维流形（$E(\mathbb{R})$ 的实点是 $\mathbb{R}$ 上的 1D 流形）
+- 3D 物体是 2 维流形（球面、立方体表面等）
+- **失配**：1D 曲线无法描述 2D 表面拓扑 → Murmuration 只能描述**原子身份**而非**原子位置**的演化
+- **理论应对**：把 Murmuration 视为"身份演化器"而非"位置演化器"：原子位置由渲染损失主导，原子身份由 ECO + Murmuration 主导
+
+#### 挑战 C: 多个 ECO 曲线共存时的身份匹配
+
+- 3D 场景有 $K$ 个物体 ↔ $K$ 条椭圆曲线 ↔ $K$ 组 Murmuration 动力学
+- 不同曲线的 j-不变量 $j(E_k)$ 各异 → 身份匹配靠 $j$-空间距离 $|j_i - j_k|$
+- **3D 风险**：物体增多时 j-空间拥挤，$\mathcal{L}_{\text{sep}}$ 中 $d_{\min} = 10$ 可能不足
+- **缓解**：根据 $K$ 动态调整 $d_{\min}$，或升级为曲线的模空间距离
+
+### 4. Murmuration 力的代码精确形式（与 `src/geometry/murmuration.py:86-145` 对齐）
+
+设 $\{P_i\}_{i=1}^N \subset E(\mathbb{R})$ 为 $N$ 个采样点，$u_{P_i}$ 为 $P_i$ 处的单位切向量，$r$ 为分离阈值半径：
+
+$$F_{\text{coh}}^i = \alpha \cdot \frac{1}{N} \sum_j \langle \log_{P_i}(P_j),\, u_{P_i} \rangle$$
+
+$$F_{\text{align}}^i = \beta \cdot \frac{1}{N} \sum_j v_j \quad \text{(1D 切空间，无需平行传输)}$$
+
+$$F_{\text{sep}}^i = -\gamma \cdot \sum_{j: d_E(P_i, P_j) < r} \frac{\langle \log_{P_i}(P_j),\, u_{P_i} \rangle}{d_E(P_i, P_j)^2 + \varepsilon}$$
+
+**速度与位置更新**（带阻尼 + 步长裁剪）：
+
+$$v_i^{\text{new}} = \text{clamp}\!\left(\text{damping} \cdot (v_i^{\text{old}} + (F_{\text{coh}}^i + F_{\text{align}}^i + F_{\text{sep}}^i) \cdot \Delta t),\ v_{\max}\right)$$
+
+$$P_i^{\text{new}} = \exp_{P_i}\!\left(v_i^{\text{new}} \cdot \Delta t \cdot u_{P_i}\right) + \text{Newton 投影修正}$$
+
+**弦距离近似测地距离**（避免 $O(N^2)$ 椭圆积分）：当 $d_E(P_i, P_j) < r$ 时用欧氏弦长代替：
+
+$$d_E^{\text{chord}}(P_i, P_j) \approx \| (x_i, y_i) - (x_j, y_j) \|_2$$
+
+这只在分离判断中用，$F_{\text{sep}}$ 的方向仍用 $\log_{P_i}$ 的符号保证正确性。
+
+### 5. 结论
+
+3D 扩展中，Murmuration 退居**身份演化器**角色，渲染损失主导位置演化。这两个空间通过 $\phi$（位置 → 身份）和渲染梯度（身份 → 位置，间接）耦合。**3D 实验验证**（`train_3d.py` + ECO 配置）是当前 Phase 7 之后的最高优先级，见 README "进行中"部分的 3D 场景聚类验证项。

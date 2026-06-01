@@ -68,6 +68,10 @@ $$\frac{dP_i}{dt} = \underbrace{v_i}_{\text{自身趋势}} + \underbrace{\text{C
 
 所有运算在椭圆曲线群上进行：$\log_{P_i}(P_j)$（对数映射/切向量）、$d_E(P_i, P_j)$（测地距离）、$P_i + P_j$（群加法）。
 
+> 📐 **详细数学文档**
+> - [docs/phase6a_eco_theory.md](docs/phase6a_eco_theory.md)：ECO 完整形式化（椭圆曲线群运算、j-不变量稳定性定理证明、Sinkhorn 兼容性定理、传感函数 φ、分岔检测、模空间优先级矩阵）
+> - [docs/math_analysis.md](docs/math_analysis.md)：3D 黎曼度量场的数学可行性分析（Cholesky 推广、测地截断 smoothstep 公式、InfoNCE 超参数学解释、占位耦合与位置正则的权重推导）
+
 ---
 
 ## 系统架构

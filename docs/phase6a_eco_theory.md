@@ -80,6 +80,72 @@ $$\mathcal{L}_{\text{ECO}} = -\sum_i \sum_j P_{ij}^E \log Q_{ij}^E + \lambda \cd
 - $d_H$ 是匈牙利距离（匹配曲线）
 - $\lambda$ 控制身份保持强度
 
+#### Sinkhorn 迭代显式形式（与代码对齐）
+
+`src/losses/direct_cluster.py` 的实际实现如下，给定 $N$ 个原子特征 $\{f_i\}$ 与 $K$ 个原型 $\{p_k\}$：
+
+**成本矩阵**（余弦相似度归一到 $[0,1]$）：
+
+$$C_{ik} = \frac{1 - \cos\langle f_i, p_k \rangle}{2} \in [0, 1]$$
+
+**Sinkhorn 核**（温度参数 $\varepsilon$）：
+
+$$K_{ik} = \exp\left(-\frac{C_{ik}}{\varepsilon}\right)$$
+
+**迭代过程**（共 $T$ 步，先列归一再行归一实现双向平衡）：
+
+$$P^{(0)}_{ik} = K_{ik}, \quad v^{(0)}_k = 1$$
+
+$$\text{for } t = 1, \ldots, T: \quad
+\begin{cases}
+P^{(t)}_{ik} = \dfrac{K_{ik}\, v^{(t-1)}_k}{\sum_{k'} K_{ik}\, v^{(t-1)}_{k'}} \\[8pt]
+v^{(t)}_k = v^{(t-1)}_k \cdot \dfrac{N/K}{\sum_{i'} P^{(t)}_{i'k}}
+\end{cases}$$
+
+**收敛性质**：
+- $P$ 矩阵**行随机**（每行和 = 1）：每个原子唯一地属于一个簇的软概率
+- $P$ 矩阵**列和平衡**为 $N/K$：每个簇的期望大小一致，避免大簇吞并小簇
+- $\varepsilon \to 0$ 时退化为 hard assignment；$\varepsilon \to \infty$ 时退化为均匀分布
+- 本项目最优 $\varepsilon = 0.05$（Phase 6c 网格搜索结果）
+
+**直接测地聚类损失**（$D_g^2$ 为测地距离平方矩阵，$P_{:,k}$ 为第 $k$ 列）：
+
+$$\mathcal{L}_{\text{direct}} = \sum_{k=1}^{K} \frac{P_{:,k}^\top D_g^2\, P_{:,k}}{(\sum_{i=1}^{N} P_{ik})^2}$$
+
+分母 $(\sum_i P_{ik})^2$ 是该簇的**有效大小平方**，阻止大簇因 $N^2$ 因子主导损失。
+
+**测地距离平方**（中点度量保证对称性）：
+
+$$d_g^2(i, j) = (\mu_i - \mu_j)^\top\, g\!\left(\frac{\mu_i + \mu_j}{2}\right)\, (\mu_i - \mu_j)$$
+
+---
+
+## 1.5 传感函数 φ 的实现架构
+
+`src/losses/eco_cluster.py` 的 $\phi: F_t \to (a_t, b_t)$ 实际是一个 **3 层 MLP**：
+
+$$\phi: \mathbb{R}^{F} \xrightarrow{W_1} \mathbb{R}^{32} \xrightarrow{\text{ReLU}} \xrightarrow{W_2} \mathbb{R}^{32} \xrightarrow{\text{ReLU}} \xrightarrow{W_3} \mathbb{R}^{2} \to (a, b)$$
+
+| 层 | 输入维度 | 输出维度 | 激活 |
+|----|---------|---------|------|
+| $W_1$ | $F$ (特征维度) | 32 | ReLU |
+| $W_2$ | 32 | 32 | ReLU |
+| $W_3$ | 32 | 2 | 无（直接输出 $(a,b)$） |
+
+**奇异性保护**（避免掉入 $\Delta = 0$ 的分岔面）：
+
+$$\text{if } |4a^3 + 27b^2| < 10^{-3} \text{ then } (a, b) \leftarrow (a, b) + 0.1 \cdot \text{sign}(a, b)$$
+
+这个 0.1 的扰动在 0.001 阈值边界处把曲线推回非奇异区域，保持 $E(\mathbb{R})$ 拓扑结构稳定。
+
+**Phase 8 附加损失**（鼓励 $(a,b)$ 远离奇点 + j-空间中彼此远离）：
+
+$$\mathcal{L}_{\text{barrier}} = -\text{mean}\left(\log\left(|4a_i^3 + 27b_i^2| + \varepsilon\right)\right)$$
+
+$$\mathcal{L}_{\text{sep}} = \text{mean}\left(\text{clamp}\big(d_{\min} - |j_i - j_k|\big)^2\right), \quad d_{\min} = 10$$
+
+前者将判别式为零的曲面变成排斥墙，后者直接拉开 j-空间中不同曲线的距离。
+
 ---
 
 ## 3. 完整算法流程
