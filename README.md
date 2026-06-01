@@ -45,9 +45,7 @@ $$O = (E,\ \mu_E,\ v),\quad E: y^2 = x^3 + ax + b,\ \Delta \neq 0$$
 - 物体身份由曲线参数 $(a,b)$ 编码，而非像素/边界框
 - $E(\mathbb{R})$ 是紧致流形（拓扑上为环面或两个圆）→ 所有轨道有界
 
-**j-不变量稳定性定理**：$j(E) = 1728 \cdot \frac{4a^3}{4a^3 + 27b^2}$ 是拓扑不变量。
-
-小扰动 $\delta a, \delta b$ 导致 $\delta j = O(\|\delta\|^2)$（二阶稳定）。外观剧变时 $j(E)$ 几乎不变 → **身份保持**。对比传统 IoU/特征方法（外观变 30% → ID 切换），非稳态下 ID 切换率大幅降低。
+**j-不变量稳定性定理**：$j(E) = 1728 \cdot \frac{4a^3}{4a^3 + 27b^2}$ 是曲线的拓扑不变量——同构的椭圆曲线具有相同的 $j$，反之亦然。$j$ 是 $(a,b)$ 的 Lipschitz 连续函数：在平坦区域（$b \approx 0$ 附近）Lipschitz 常数极小，$j$ 近乎不变；在一般区域 Lipschitz 常数约为 $|∇j| \sim 10^3\text{-}10^4$。φ 的训练目标是将 $(a,b)$ 约束在平坦区域，使外观剧变时 $j(E)$ 保持稳定 → **身份保持**。相比传统 IoU/特征方法（外观变 30% → ID 切换），非稳态下 ID 切换率大幅降低。
 
 ### 3. 直接测地聚类损失 (Direct Cluster)
 
@@ -69,8 +67,10 @@ $$\frac{dP_i}{dt} = \underbrace{v_i}_{\text{自身趋势}} + \underbrace{\text{C
 所有运算在椭圆曲线群上进行：$\log_{P_i}(P_j)$（对数映射/切向量）、$d_E(P_i, P_j)$（测地距离）、$P_i + P_j$（群加法）。
 
 > 📐 **详细数学文档**
+> - [docs/framework_audit.md](docs/framework_audit.md)：**框架系统审计** — 34 项命题/实验/假设的数学严格性评估（17.6% 已证明，8 项阻塞级缺陷）
+> - [docs/gradient_flow_analysis.md](docs/gradient_flow_analysis.md)：Direct Cluster vs InfoNCE 梯度流分析（甜区宽度理论、Sinkhorn 最优 ε 推导、Phase 7 landscape 双稳态解释）
 > - [docs/phase6a_eco_theory.md](docs/phase6a_eco_theory.md)：ECO 完整形式化（椭圆曲线群运算、j-不变量稳定性定理证明、Sinkhorn 兼容性定理、传感函数 φ、分岔检测、模空间优先级矩阵）
-> - [docs/math_analysis.md](docs/math_analysis.md)：3D 黎曼度量场的数学可行性分析（Cholesky 推广、测地截断 smoothstep 公式、InfoNCE 超参数学解释、占位耦合与位置正则的权重推导）
+> - [docs/math_analysis.md](docs/math_analysis.md)：3D 黎曼度量场的数学可行性分析（Cholesky 推广、测地截断 smoothstep 公式、InfoNCE 超参数学解释、占位耦合与位置正则的权重推导、3D Murmuration 接口）
 
 ---
 

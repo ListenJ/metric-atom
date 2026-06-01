@@ -35,15 +35,20 @@ def j_invariant_from_ab(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     j-invariant: j = 1728 * 4a^3 / (4a^3 + 27b^2).
 
-    Uses z-score normalization to keep atom and prototype j-invariants
-    in the same reference frame, ensuring the Sinkhorn cost is meaningful.
+    Returns raw j-invariant (batch-independent identity). The Sinkhorn cost
+    is normalized internally via divide-by-max, so absolute scale is fine.
+    
+    NOTE: Previously used z-score normalization which made j batch-dependent,
+    contradicting ECO's core claim that identity = absolute curve parameters.
+    Fixed to use raw j (with optional /1728 scaling for stability).
     """
     a3 = 4.0 * a ** 3
     b2 = 27.0 * b ** 2
     denom = a3 + b2
     j_raw = 1728.0 * a3 / denom.clamp(min=1e-10)
-    j_centered = j_raw - j_raw.mean()
-    return j_centered / (j_centered.std() + 1e-8)
+    # Scale to ~[0, 1] for most non-singular real curves (j ∈ [0, 1728] typically).
+    # Using global scale (not batch-dependent) preserves identity across batches.
+    return j_raw / 1728.0
 
 
 # ---------------------------------------------------------------------------
@@ -126,18 +131,29 @@ def identity_consistency_loss(j_current: torch.Tensor, j_initial: torch.Tensor) 
 # Phase 8: Discriminant barrier + j-space separation
 # ---------------------------------------------------------------------------
 
-def discriminant_barrier_loss(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+def discriminant_barrier_loss(a: torch.Tensor, b: torch.Tensor, alpha: float = 10.0) -> torch.Tensor:
     """
-    Log barrier: penalize Δ = 4a^3 + 27b^2 → 0 (singular curves).
+    Bounded exponential barrier: penalize Δ = 4a³ + 27b² → 0 (singular curves).
 
-    When Δ→0, the j-invariant denominator → 0, causing gradient explosion and
-    subsequent feature collapse. This barrier turns the singular locus into a
-    repulsive wall instead of an attractor.
+    L_barrier = mean(exp(-α · |Δ|))
 
-    L_barrier = -mean(log(|Δ| + ε))
+    Unlike the previous log-barrier (-log|Δ|), this barrier has BOUNDED gradient:
+      ∂L/∂(a,b) = -α·exp(-α|Δ|)·sign(Δ)·∂Δ/∂(a,b)
+    At Δ→0: |∇L| ≈ α·|∂Δ/∂(a,b)| ≈ 10·(12a²,54b) ≈ 300 (safe for BF16).
+    At Δ→∞: exp(-α|Δ|)→0, gradient vanishes gracefully.
+
+    Penalty profile:
+      |Δ| = 0.0: L = 1.0 (max repulsion)
+      |Δ| = 0.1: L ≈ 0.37
+      |Δ| = 0.5: L ≈ 0.007
+      |Δ| ≥ 1.0: L ≈ 0 (no penalty)
+
+    Args:
+        a, b: curve parameters
+        alpha: barrier steepness (default 10.0)
     """
     delta = 4.0 * a ** 3 + 27.0 * b ** 2
-    return -torch.log(torch.abs(delta) + eps).mean()
+    return torch.exp(-alpha * torch.abs(delta)).mean()
 
 
 def j_space_separation_loss(j_atoms: torch.Tensor, min_dist: float = 0.1) -> torch.Tensor:
@@ -214,7 +230,7 @@ class ECOClusterLoss(nn.Module):
         self._j_initialized = False
 
     def compute_j_invariants(self, features: torch.Tensor) -> torch.Tensor:
-        """Map features to z-scored j-invariants via sensing function."""
+        """Map features to j-invariants via sensing function (j/1728 scaled, batch-independent)."""
         a, b = self.sensing(features)
         return j_invariant_from_ab(a, b)
 
@@ -226,7 +242,7 @@ class ECOClusterLoss(nn.Module):
         return 1728.0 * a3 / (a3 + b2).clamp(min=1e-10)
 
     def collapse_detected(self, features: torch.Tensor, threshold: float = 0.02) -> bool:
-        """Phase 8: feature std collapse (not j, since z-score masks j variance)."""
+        """Phase 8: detect feature collapse (monitor features, not j)."""
         return features.shape[0] >= 2 and features.std(dim=0).mean().item() < threshold
 
     def orthogonal_mutation(self, noise_scale: float = 0.3) -> bool:

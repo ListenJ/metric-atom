@@ -55,9 +55,12 @@ $$(a_t, b_t) = \text{MLP}(\text{concat}[F_t^{\text{visual}}, F_t^{\text{audio}},
 $$j(E) = 1728 \cdot \frac{4a^3}{4a^3 + 27b^2}$$
 
 性质：
-- $j(E)$ 是曲线的拓扑不变量：同构的曲线有相同的 $j$
-- 小扰动 $\delta a, \delta b$ 导致 $\delta j = O(\|\delta\|^2)$（二阶稳定）
-- 即使 $(a,b)$ 变化很大，只要 $j$ 不变，物体就是同一个
+- $j(E)$ 是曲线的拓扑不变量：同构的曲线有相同的 $j$，反之亦然（代数几何定理）
+- $j$ 是 $(a,b)$ 的 Lipschitz 连续函数，梯度为
+  $$\nabla j = \frac{1728}{(4a^3+27b^2)^2} \cdot \big(324a^2b^2,\; -216a^3b\big)$$
+  在 $b \approx 0$ 附近，$|\nabla j| \ll 1$（平坦区）；在一般位置 $|\nabla j| \sim 10^3\text{-}10^4$
+  → 正确的稳定性表述是 $|\delta j| \leq |\nabla j| \cdot |\delta|$
+- $\varphi$ 的训练将 $(a,b)$ 约束在 $j$ 的平坦区域，确保跨帧身份稳定
 
 $$\text{非稳态} \Rightarrow (a_t, b_t) \text{ 变化大} \Rightarrow \text{但 } j(E_t) \approx j(E_0) \Rightarrow \text{身份保持}$$
 
