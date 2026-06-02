@@ -245,6 +245,9 @@ $$d_E^{\text{chord}}(P_i, P_j) \approx \| (x_i, y_i) - (x_j, y_j) \|_2$$
 
 这只在分离判断中用，$F_{\text{sep}}$ 的方向仍用 $\log_{P_i}$ 的符号保证正确性。
 
+> 📐 **Murmuration 动力学严格分析**: [docs/murmuration_dynamics.md](murmuration_dynamics.md) —
+> Lyapunov 函数存在性（$V = T + U$, $dV/dt \le 0$ 当 $\eta > \beta$）、Hartman-Grobman 局部稳定性（Fourier 谱分析）、吸引域估计（能量水平集）、与训练 Phase 6→7 的对应。
+
 ### 5. 结论
 
 3D 扩展中，Murmuration 退居**身份演化器**角色，渲染损失主导位置演化。这两个空间通过 $\phi$（位置 → 身份）和渲染梯度（身份 → 位置，间接）耦合。**3D 实验验证**（`train_3d.py` + ECO 配置）是当前 Phase 7 之后的最高优先级，见 README "进行中"部分的 3D 场景聚类验证项。

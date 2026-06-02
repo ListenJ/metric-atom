@@ -217,7 +217,7 @@ ECO 提供：
 | 优先级 | 数学领域 | 为什么必须 | 缺了会怎样 |
 |--------|---------|-----------|-----------|
 | P0 | 微分几何：流形上的运算 | Boids在E上跑，需要exp/log映射 | 无法实现 |
-| P0 | 动力系统：Lyapunov稳定性 | 证明murmuration不会发散 | 审稿人会问 |
+| P0 | 动力系统：Lyapunov稳定性 | 证明murmuration不会发散 → **[✓ 已证明]** | 审稿人会问 → [murmuration_dynamics.md](murmuration_dynamics.md) |
 | P1 | 最优传输：流形Sinkhorn | Direct Loss要在E上跑 | 只有欧氏Sinkhorn |
 | P1 | 分岔理论 | 非稳态的数学描述 | 无法区分"变形"vs"分裂" |
 | P2 | 代数几何：模空间 | 理论深度，论文亮点 | 不够强但能跑 |

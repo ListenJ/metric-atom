@@ -73,6 +73,7 @@ $$\frac{dP_i}{dt} = \underbrace{v_i}_{\text{自身趋势}} + \underbrace{\text{C
 > - [docs/remaining_proofs.md](docs/remaining_proofs.md)：**三大遗留问题完整证明** — PL 条件严格证明（定理 1,2）、K > 2 簇泛化（命题 3,4）、ECO 协同收敛（命题 5,6,7）
 > - [docs/phase6a_eco_theory.md](docs/phase6a_eco_theory.md)：ECO 完整形式化（椭圆曲线群运算、j-不变量稳定性定理证明、Sinkhorn 兼容性定理、传感函数 φ、分岔检测、模空间优先级矩阵）
 > - [docs/math_analysis.md](docs/math_analysis.md)：3D 黎曼度量场的数学可行性分析（Cholesky 推广、测地截断 smoothstep 公式、InfoNCE 超参数学解释、占位耦合与位置正则的权重推导、3D Murmuration 接口）
+> - [docs/murmuration_dynamics.md](docs/murmuration_dynamics.md)：**Murmuration 动力学严格分析** — Lyapunov 函数存在性证明（V=T+U, dV/dt ≤ 0 当 η>β）、Hartman-Grobman 局部稳定性（Fourier 谱分析）、吸引域估计（能量水平集方法）、Cucker-Smale 联系、训练 Phase 对应
 
 ---
 

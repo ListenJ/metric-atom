@@ -203,19 +203,29 @@ $$P_{i}(t + \Delta t) = \exp_{P_i(t)}(v_i(t) \cdot \Delta t \cdot u_{P_i})$$
 
 **代码中的 Newton 投影修正（murmuration.py）是 ad-hoc 修复**——它试图把偏离的点拉回曲线，但没有收敛保证。
 
-### 缺陷 4.2 ✗ Lyapunov 函数不存在
+### 缺陷 4.2 ✓ Lyapunov 函数不存在 → **[已解决 2026-06-02]**
 
-**声称：** P0 优先级中是"动力系统：Lyapunov 稳定性——证明 murmuration 不会发散"。但当前：**没有 Lyapunov 函数被构造**。
+**声称：** P0 优先级中是"动力系统：Lyapunov 稳定性——证明 murmuration 不会发散"。
 
-如果 Murmuration 是稳定的，应该存在一个能量函数 V(P₁,...,P_N) 满足：
-1. V ≥ 0，且 V = 0 仅在稳定构型
-2. dV/dt ≤ 0 对所有初始条件
+**之前状态：** 没有 Lyapunov 函数被构造。对于标准 Boids (Reynolds 1987)，不存在全局 Lyapunov 函数（能量不单调递减）。
 
-对于标准的 Boids 模型 (Reynolds 1987)：
-- 不存在全局 Lyapunov 函数（能量不单调递减）
-- 正确的收敛概念是"flocking"（形成稳定群体），而非"能量衰减"
+**解决：** 见 [murmuration_dynamics.md](murmuration_dynamics.md) §二。
+在椭圆曲线上的特殊结构中（1D 切空间，力 → 标量），凝聚和分离力是保守的（来自势能 U_coh + U_sep）。
+仅对齐力涉及速度耦合。构造:
 
-**对于 Murmuration on E，连 flocking 条件都没有被证明。**
+```
+V = ½ Σ v_i² + ½α Σ (1/Nᵢ) Σ d_g(Pᵢ,Pⱼ)² + γ Σ (r-d)²
+```
+
+当 η > β（阻尼系数 > 对齐权重，默认 1.0 > 0.05 满足）时:
+
+```
+dV/dt = -(η-β) Σ v_i² - β/2 Σ (1/Nᵢ) Σ (vᵢ-vⱼ)² ≤ 0
+```
+
+**严格 Lyapunov 函数存在**，全局收敛到均匀间距晶体构型（模旋转）。
+这是项目中最干净的证明之一——由于 1D 切空间的降维结构，
+Murmuration on E 比标准 3D Boids 更易分析。
 
 ### 缺陷 4.3 ✗ Newton 投影修复的收敛保证
 
