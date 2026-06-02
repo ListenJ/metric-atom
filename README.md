@@ -69,6 +69,8 @@ $$\frac{dP_i}{dt} = \underbrace{v_i}_{\text{自身趋势}} + \underbrace{\text{C
 > 📐 **详细数学文档**
 > - [docs/framework_audit.md](docs/framework_audit.md)：**框架系统审计** — 34 项命题/实验/假设的数学严格性评估（17.6% 已证明，8 项阻塞级缺陷）
 > - [docs/gradient_flow_analysis.md](docs/gradient_flow_analysis.md)：Direct Cluster vs InfoNCE 梯度流分析（甜区宽度理论、Sinkhorn 最优 ε 推导、Phase 7 landscape 双稳态解释）
+> - [docs/convergence_rate_analysis.md](docs/convergence_rate_analysis.md)：收敛速率严格分析（Lipschitz 常数推导、O(1/t) 次线性收敛证明、PL 条件线性收敛、ε-条件数关系、vs InfoNCE 收敛对比）
+> - [docs/remaining_proofs.md](docs/remaining_proofs.md)：**三大遗留问题完整证明** — PL 条件严格证明（定理 1,2）、K > 2 簇泛化（命题 3,4）、ECO 协同收敛（命题 5,6,7）
 > - [docs/phase6a_eco_theory.md](docs/phase6a_eco_theory.md)：ECO 完整形式化（椭圆曲线群运算、j-不变量稳定性定理证明、Sinkhorn 兼容性定理、传感函数 φ、分岔检测、模空间优先级矩阵）
 > - [docs/math_analysis.md](docs/math_analysis.md)：3D 黎曼度量场的数学可行性分析（Cholesky 推广、测地截断 smoothstep 公式、InfoNCE 超参数学解释、占位耦合与位置正则的权重推导、3D Murmuration 接口）
 
