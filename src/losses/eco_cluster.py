@@ -206,6 +206,7 @@ class ECOClusterLoss(nn.Module):
     ):
         super().__init__()
         self.n_clusters = n_clusters
+        self.feature_dim = feature_dim
         self.sinkhorn_eps = sinkhorn_eps
         self.sinkhorn_iters = sinkhorn_iters
         self.ent_weight = ent_weight
