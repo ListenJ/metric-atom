@@ -6,6 +6,7 @@ MetricAtom 2D 训练脚本 — 支持 64×64 验证 + 128×128 完整训练。
 
 import torch
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 import os
 from pathlib import Path
@@ -216,9 +217,9 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                 # Diffusion hyperparameters
                 diff_K=5, diff_alpha=0.5, diff_T=2,
                 # Direct cluster loss hyperparameters (Path 1+3)
-                use_direct_loss=True, w_direct=2.0, sinkhorn_eps=0.1, sinkhorn_iters=50, ent_weight=0.005,
+                use_direct_loss=True, w_direct=2.0, sinkhorn_eps=0.05, sinkhorn_iters=100, ent_weight=0.005,
                 # ECO cluster loss hyperparameters (Phase 6b)
-                use_eco=False, w_eco=0.5, eco_sinkhorn_eps=0.5, eco_sinkhorn_iters=50,
+                use_eco=False, w_eco=0.5, eco_sinkhorn_eps=0.05, eco_sinkhorn_iters=50,
                 eco_ent_weight=0.005, eco_id_weight=0.1,
                 # Phase 8: discriminant barrier + j-separation
                 barrier_weight=0.0, sep_weight=0.0,
@@ -313,6 +314,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
         )
 
     optimizer = torch.optim.Adam(optimizer_param_groups)
+    scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=lr * 0.01)
     
     print(f"[3/5] 预计算光线...")
     rays_o, rays_d = RaySampler2D.generate_rays_orthographic(
@@ -613,6 +615,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
         torch.nn.utils.clip_grad_norm_(all_params, 1.0)
         scaler.step(optimizer)
         scaler.update()
+        scheduler.step()
 
         # ── 剪枝和播种（在 autocast 外部） ──
         if do_prune:
@@ -771,10 +774,10 @@ if __name__ == '__main__':
                         help='Fall back to InfoNCE instead of direct cluster loss (for ablation)')
     parser.add_argument('--w-direct', type=float, default=2.0,
                         help='Direct cluster loss weight (default: 2.0)')
-    parser.add_argument('--sinkhorn-eps', type=float, default=0.1,
-                        help='Sinkhorn entropy regularization (default: 0.1)')
-    parser.add_argument('--sinkhorn-iters', type=int, default=50,
-                        help='Sinkhorn iterations (default: 50)')
+    parser.add_argument('--sinkhorn-eps', type=float, default=0.05,
+                        help='Sinkhorn entropy regularization (default: 0.05)')
+    parser.add_argument('--sinkhorn-iters', type=int, default=100,
+                        help='Sinkhorn iterations (default: 100)')
     parser.add_argument('--ent-weight', type=float, default=0.005,
                         help='Entropy penalty weight for balanced clusters (default: 0.005)')
     # ── ECO cluster loss args (Phase 6b) ──
@@ -782,8 +785,8 @@ if __name__ == '__main__':
                         help='Add ECO j-invariant identity regularization alongside DirectCluster')
     parser.add_argument('--w-eco', type=float, default=0.5,
                         help='ECO regularization weight for j-invariant stability (default: 0.5)')
-    parser.add_argument('--eco-sinkhorn-eps', type=float, default=0.5,
-                        help='ECO Sinkhorn entropy regularization (default: 0.5)')
+    parser.add_argument('--eco-sinkhorn-eps', type=float, default=0.05,
+                        help='ECO Sinkhorn entropy regularization (default: 0.05)')
     parser.add_argument('--eco-sinkhorn-iters', type=int, default=50,
                         help='ECO Sinkhorn iterations (default: 50)')
     parser.add_argument('--eco-ent-weight', type=float, default=0.005,
