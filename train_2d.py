@@ -493,11 +493,35 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                     print(f"  [DirectCluster] Balanced init: "
                           f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
 
+                    # ── Feature-geodesic alignment check ──
+                    # Verify that Sinkhorn assignments from initialized features
+                    # agree with position-based KMeans labels. Low agreement = high
+                    # risk of cluster divergence (seeds like 99 with ARI=-0.031).
+                    with torch.no_grad():
+                        feats_now = torch.stack([a._feature for a in atoms])
+                        _, P0, _ = direct_cluster(mus, metric_field, feats_now)
+                        hard_init = P0.argmax(dim=1).cpu().numpy()
+                        labels_np = np.asarray(labels, dtype=int)
+                        # Permutation-invariant agreement: try both label orderings
+                        acc1 = (hard_init == labels_np).mean()
+                        acc2 = (hard_init == (1 - labels_np)).mean()
+                        init_agree = max(acc1, acc2)
+                        status = "✓" if init_agree > 0.7 else ("△" if init_agree > 0.5 else "✗")
+                        print(f"  [AlignCheck] Sinkhorn→KMeans agreement: {init_agree:.2%} {status}")
+
                 # Direct cluster loss: Sinkhorn assignment + geodesic compaction
                 loss_direct, P, dc_metrics = direct_cluster(
                     mus, metric_field, cluster_feats
                 )
-                loss_coh = loss_direct * w_direct
+                # Warm-start: ramp w_direct from 0 to w_direct over first 50 epochs of Phase 2
+                # Prevents early bad gradients from destroying the KMeans initialization
+                warmup_epochs = 50
+                if epoch < phase2_start + warmup_epochs:
+                    warmup_factor = (epoch - phase2_start) / warmup_epochs
+                    w_direct_effective = w_direct * warmup_factor
+                else:
+                    w_direct_effective = w_direct
+                loss_coh = loss_direct * w_direct_effective
                 coh_val = loss_direct.item()
                 cluster_balance_val = dc_metrics['cluster_balance']
                 loss_reg += loss_coh

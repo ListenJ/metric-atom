@@ -62,7 +62,7 @@ def sinkhorn_softmax(cost, epsilon=0.1, n_iters=50):
         # Update column scaling: v_k *= target_size / actual_size
         col_sums = P.sum(dim=0)  # (K,)
         target = N / K
-        v = v * target / col_sums.clamp(min=1e-10)
+        v = (v * target / col_sums.clamp(min=1e-10)).clamp(max=1e3)  # prevent explosion
 
     # Final row normalization
     row_sums = (K_mat * v.unsqueeze(0)).sum(dim=1, keepdim=True)
@@ -209,7 +209,9 @@ class DirectClusterLoss(nn.Module):
         # Low row entropy = confident assignments (good)
         # We mildly penalize high entropy to encourage sharp clustering
         row_ent = -(P * torch.log(P + 1e-10)).sum(dim=1).mean()
-        loss = loss - self.ent_weight * row_ent
+        # + ent_weight * row_ent: penalize high entropy (encourage SHARP assignments)
+        # Previously was "-", which rewarded uniform assignments — a sign error
+        loss = loss + self.ent_weight * row_ent
 
         # ── Debug metrics ──
         cluster_sizes = P.sum(dim=0).detach()  # (K,)
