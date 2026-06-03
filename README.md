@@ -36,18 +36,7 @@ Cholesky 参数化保证正定性：$g = LL^\top + \epsilon I$。
 - 物体内部 $\mathrm{tr}(g) < 1$，背景 $\mathrm{tr}(g) > 9$
 - 度量场在物体边界处锐利跳变 → 自然定义聚类边界
 
-### 2. 椭圆曲线物体 (ECO) 理论
-
-每个物体被建模为**椭圆曲线上的概率流形**：
-
-$$O = (E,\ \mu_E,\ v),\quad E: y^2 = x^3 + ax + b,\ \Delta \neq 0$$
-
-- 物体身份由曲线参数 $(a,b)$ 编码，而非像素/边界框
-- $E(\mathbb{R})$ 是紧致流形（拓扑上为环面或两个圆）→ 所有轨道有界
-
-**j-不变量稳定性定理**：$j(E) = 1728 \cdot \frac{4a^3}{4a^3 + 27b^2}$ 是曲线的拓扑不变量——同构的椭圆曲线具有相同的 $j$，反之亦然。$j$ 是 $(a,b)$ 的 Lipschitz 连续函数：在平坦区域（$b \approx 0$ 附近）Lipschitz 常数极小，$j$ 近乎不变；在一般区域 Lipschitz 常数约为 $|∇j| \sim 10^3\text{-}10^4$。φ 的训练目标是将 $(a,b)$ 约束在平坦区域，使外观剧变时 $j(E)$ 保持稳定 → **身份保持**。相比传统 IoU/特征方法（外观变 30% → ID 切换），非稳态下 ID 切换率大幅降低。
-
-### 3. 直接测地聚类损失 (Direct Cluster)
+### 2. 直接测地聚类损失 (Direct Cluster)
 
 用 Sinkhorn 可微软分配替代 InfoNCE，消除黎曼空间逻辑循环：
 
@@ -55,16 +44,11 @@ $$\mathcal{L}_{\text{direct}} = \sum_k \frac{P[:,k]^\top D_g^2\, P[:,k]}{(\text{
 
 - **Sinkhorn 软分配** $P$：基于特征-原型余弦相似度，可微，梯度流连续
 - 度量场 $g$ 直接最小化簇内测地距离，不再通过特征间接优化
-- **ECO 扩展版**：将欧氏 cost 替换为椭圆曲线上的测地线距离 + j-不变量身份一致性正则
-- 训练稳定性：从 InfoNCE 的"甜区宽度极窄"（$w_{\text{vol}} = 0.1 \pm 0.025$）变为**宽且稳定**
+- 训练稳定性：InfoNCE 的"甜区宽度极窄"（$w_{\text{vol}} = 0.1 \pm 0.025$）已被 Direct Cluster 替代，后者在 ε=0.05 下 ARI=0.93
 
-### 4. Murmuration 动力学
+### 3. Murmuration 动力学 [HISTORICAL]
 
-物体上的点沿椭圆曲线群运动，遵循 Boids 规则：
-
-$$\frac{dP_i}{dt} = \underbrace{v_i}_{\text{自身趋势}} + \underbrace{\text{Cohesion}}_{\text{凝聚力}} + \underbrace{\text{Alignment}}_{\text{对齐}} + \underbrace{\text{Separation}}_{\text{分离}}$$
-
-所有运算在椭圆曲线群上进行：$\log_{P_i}(P_j)$（对数映射/切向量）、$d_E(P_i, P_j)$（测地距离）、$P_i + P_j$（群加法）。
+> 2026-06-03: Murmuration 代码（murmuration.py, elliptic_curve.py）已随 ECO 路径移除。Lyapunov 稳定性分析（murmuration_dynamics.md）作为理论成果保留，数值验证已通过（S¹ 离散 Murmuration Lyapunov 单调递减）。
 
 > 📐 **详细数学文档**
 > - [docs/framework_audit.md](docs/framework_audit.md)：**框架系统审计** — 34 项命题/实验/假设的数学严格性评估（17.6% 已证明，8 项阻塞级缺陷）
@@ -82,16 +66,13 @@ $$\frac{dP_i}{dt} = \underbrace{v_i}_{\text{自身趋势}} + \underbrace{\text{C
 
 ```
 src/
-├── geometry/           # 黎曼度量场（2D/3D）+ 椭圆曲线几何 (Phase 6b)
+├── geometry/           # 黎曼度量场（2D/3D）
 │   ├── cholesky_param.py
-│   ├── metric_field.py
-│   ├── elliptic_curve.py    # ECO: 群运算 / log/exp 映射 / j-不变量
-│   └── murmuration.py       # Boids 在椭圆曲线上的动力学
+│   └── metric_field.py
 ├── atoms/              # 感知原子定义
 ├── rendering/          # 体积渲染器
 ├── losses/             # 损失函数
-│   ├── direct_cluster.py    # Direct Loss (Path 1+3, ARI 0.755)
-│   └── eco_cluster.py       # ECO Cluster Loss (Phase 6c, j-不变量正则化)
+│   └── direct_cluster.py    # Direct Cluster Loss (ε=0.05, ARI=0.93)
 ├── data/               # 合成数据生成
 ├── visualization/      # 可视化
 └── training/           # 训练循环
@@ -102,13 +83,15 @@ src/
 > 完整实验历史（Phase 1 → Phase 7）请见 [docs/history.md](docs/history.md)。
 > 以下仅列出最近三次关键结果。
 
-### Phase 6b: ECO 代码实现（2026-05-18）
+### Phase 6b: ECO 代码实现（2026-05-18）[HISTORICAL]
+
+> ⚠️ 2026-06-03: ECO 路径已放弃（ARI=0.30 vs DirectCluster=0.93），所有相关代码已移除。保留作为理论探索记录。
 
 | 模块 | 功能 |
 |------|------|
-| `elliptic_curve.py` | 群运算（加法/标量乘法）、log/exp 映射、测地距离数值积分、j-不变量、分岔检测 |
-| `murmuration.py` | Boids 在椭圆曲线上的动力学（凝聚/对齐/分离力在 1D 切空间中），PyTorch 批处理版本 |
-| `eco_cluster.py` | ECO 版 Direct Loss：感知函数 φ: features→(a,b)，曲线残差成本矩阵，j-不变量身份一致性正则项 |
+| `elliptic_curve.py` (已删除) | 群运算（加法/标量乘法）、log/exp 映射、测地距离数值积分、j-不变量、分岔检测 |
+| `murmuration.py` (已删除) | Boids 在椭圆曲线上的动力学（凝聚/对齐/分离力在 1D 切空间中），PyTorch 批处理版本 |
+| `eco_cluster.py` (已删除) | ECO 版 Direct Loss：感知函数 φ: features→(a,b)，曲线残差成本矩阵，j-不变量身份一致性正则项 |
 
 ### Phase 7: Landscape 系统性扫描（2026-05-19）
 
@@ -121,11 +104,13 @@ src/
 - 但方差极大（σ=0.39），约 50% seed 未能有效聚类——确认了尖锐悬崖现象
 - 完美聚类仅需 50/111 原子落在物体内，说明聚类质量 ≠ 覆盖数量
 
-### Phase 6c: ECO 统一公式 + 精细调参（2026-05-20）
+### ⚠️ Phase 6c: ECO 统一公式 + 精细调参 [HISTORICAL]（2026-05-20，2026-06-03 废止）
+
+> **ECO 路径已于 2026-06-03 完全废止**：j 是模函数映射到 ℂ∪{∞}，非欧几里得空间，j 空间聚类本质病态。实验确认 ECO 严重恶化聚类（ARI 0.30），而 Direct Cluster ε=0.05 + CosineLR 达到 ARI 0.93。ECOClusterLoss、elliptic_curve、murmuration 代码已全部删除。保留下方调参记录仅作为历史参考。
 
 **核心统一公式**：`feature → 感知函数 φ → (a,b) → j-不变量 → Sinkhorn cost C_ik = |j_i - j_k|`
 
-#### 调参历程
+#### 调参历程（历史记录）
 
 | 迭代 | 配置变化 | 均值 ARI | 标准差 | ≥0.5 |
 |------|---------|---------|--------|------|
@@ -174,9 +159,9 @@ python train_2d.py --bf16 --use-eco --w-eco 0.5 --eco-id-weight 0.1 \
 | 重建 + 度量平滑 + 占位耦合损失 | ✅ 完成 | L1 < 0.08，trace 分离明显 |
 | 凝聚损失（InfoNCE） | ✅ 完成 | KMeans 特征初始化 + 对比学习 |
 | 特征扩散（测地亲和矩阵） | ✅ 完成 | 零额外参数，全可微 |
-| 直接测地聚类损失（Sinkhorn + L_direct） | ✅ **突破** | ARI 0.440→**0.755** |
-| 椭圆曲线几何 + Murmuration 动力学 (Phase 6b) | ✅ 完成 | 群运算、exp/log 映射、Boids on E |
-| ECO 聚类损失 (Phase 6c) | ✅ 完成 | j-不变量身份一致性 + φ 感知函数 |
+| 直接测地聚类损失（Sinkhorn + L_direct） | ✅ **突破** | ARI 0.440→**0.755**→**0.931**（ε=0.05 + CosineLR） |
+| ~~椭圆曲线几何 + Murmuration 动力学 (Phase 6b)~~ | ⚠️ 已废弃 | ECO 路径已删除（代码移除 2026-06-03） |
+| ~~ECO 聚类损失 (Phase 6c)~~ | ⚠️ 已废弃 | ECO 路径已删除（代码移除 2026-06-03） |
 | 超参网格搜索框架 | ✅ 完成 | Phase 4/5：w_direct × sinkhorn_eps |
 | 数值稳定性优化 | ✅ 完成 | overflow-safe Newton + group-law exp_map |
 | 动态原子管理 | ✅ 完成 | 剪枝 + 播种 + 位置正则化 |

@@ -1,4 +1,6 @@
-# Phase 6a: Murmuration-Elliptic Curve 物体表示理论框架
+# [HISTORICAL] Phase 6a: Murmuration-Elliptic Curve 物体表示理论框架
+
+> **⚠️ DEPRECATED (2026-06-03)**: ECO 路径已放弃。实验验证表明 j-invariant 聚类在 j 空间（ℂ∪{∞}）本质病态：jDist 达 2.3e11，ARI=0.30 vs DirectCluster 的 0.93。此文档作为理论探索历史记录保留。正确路径：Direct Cluster Loss + Sinkhorn 软分配。
 
 ## 1. 核心定义
 

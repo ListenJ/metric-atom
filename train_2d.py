@@ -46,9 +46,7 @@ from src.rendering.volume_renderer_2d import volume_render_2d
 from src.losses.reconstruction import l1_loss
 from src.losses.metric_regularizer import metric_smoothness_loss
 from src.losses.occupancy_coupling import occupancy_coupling_loss
-from src.losses.coherence import contrastive_coherence_loss
 from src.losses.direct_cluster import DirectClusterLoss
-from src.losses.eco_cluster import ECOClusterLoss
 from src.losses.diffusion import compute_geodesic_affinity, feature_diffusion
 from src.data.synthetic_2d import generate_multi_view, get_occupancy
 from src.visualization.plot_metric import (
@@ -217,12 +215,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                 # Diffusion hyperparameters
                 diff_K=5, diff_alpha=0.5, diff_T=2,
                 # Direct cluster loss hyperparameters (Path 1+3)
-                use_direct_loss=True, w_direct=2.0, sinkhorn_eps=0.05, sinkhorn_iters=100, ent_weight=0.005,
-                # ECO cluster loss hyperparameters (Phase 6b)
-                use_eco=False, w_eco=0.5, eco_sinkhorn_eps=0.05, eco_sinkhorn_iters=50,
-                eco_ent_weight=0.005, eco_id_weight=0.1,
-                # Phase 8: discriminant barrier + j-separation
-                barrier_weight=0.0, sep_weight=0.0,
+                w_direct=2.0, sinkhorn_eps=0.05, sinkhorn_iters=100, ent_weight=0.005,
                 # Random seed
                 seed=42):
     """完整训练流程 — 支持 64x64 快速验证和 128x128 训练"""
@@ -271,32 +264,13 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
     atoms = create_atoms(num_atoms, device, seed=seed, radius_min=0.25, radius_max=0.35,
                          occupancy=frame_occupancy[0] if num_atoms > 0 else None)
 
-    # ── Direct Cluster Loss 模块（Path 1+3: Sinkhorn + 直接测地距离优化） ──
-    if use_eco:
-        # ECO supplements DirectCluster with j-invariant identity regularization
-        eco_cluster = ECOClusterLoss(
-            n_clusters=n_clusters, feature_dim=16,
-            sinkhorn_eps=eco_sinkhorn_eps, sinkhorn_iters=eco_sinkhorn_iters,
-            ent_weight=eco_ent_weight, id_weight=eco_id_weight,
-        ).to(device)
-        eco_cluster.set_barrier_sep(barrier_weight, sep_weight)
-        eco_initialized = False
-        print(f"[ECO] ECO 正则化已启用 (id_weight={eco_id_weight}, barrier={barrier_weight}, sep={sep_weight})")
-    else:
-        eco_cluster = None
-        eco_initialized = True
-
-    if use_direct_loss or use_eco:
-        # DirectCluster is ALWAYS the primary clustering signal when ECO is enabled
-        direct_cluster = DirectClusterLoss(
-            n_clusters=n_clusters, feature_dim=16,
-            sinkhorn_eps=sinkhorn_eps, sinkhorn_iters=sinkhorn_iters,
-            ent_weight=ent_weight
-        ).to(device)
-        direct_cluster_initialized = False
-    else:
-        direct_cluster = None
-        direct_cluster_initialized = True
+    # ── Direct Cluster Loss 模块（Sinkhorn + 直接测地距离优化） ──
+    direct_cluster = DirectClusterLoss(
+        n_clusters=n_clusters, feature_dim=16,
+        sinkhorn_eps=sinkhorn_eps, sinkhorn_iters=sinkhorn_iters,
+        ent_weight=ent_weight
+    ).to(device)
+    direct_cluster_initialized = False
 
     atom_params = [p for a in atoms for p in a.parameters()]
 
@@ -308,11 +282,6 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
         optimizer_param_groups.append(
             {'params': direct_cluster.parameters(), 'lr': lr * 3}
         )
-    if eco_cluster is not None:
-        optimizer_param_groups.append(
-            {'params': eco_cluster.parameters(), 'lr': lr * 3}
-        )
-
     optimizer = torch.optim.Adam(optimizer_param_groups)
     scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=lr * 0.01)
     
@@ -336,7 +305,6 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
     atom_birth_epochs = {id(a): 0 for a in atoms}
     diff_val = 0.0  # 扩散相关指标（Phase 2 前保持 0）
     cluster_balance_val = 0.0  # 簇平衡度（Phase 2 前保持 0）
-    j_drift_val = 0.0  # ECO j-不变量漂移（Phase 2 前保持 0）
     
     # 64×64 快速验证用更激进的参数
     is_quick = (H <= 64 and num_epochs <= 600)
@@ -433,178 +401,60 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                 mus = torch.stack([a.position for a in atoms])
                 feats = torch.stack([a._feature for a in atoms])
 
-                if use_eco:
-                    # ═══════════════════════════════════════════════════
-                    # ECO + DirectCluster 联合聚类
-                    #
-                    # DirectCluster: 主信号（特征-原型 Sinkhorn + 测地压缩）
-                    # ECO: j-不变量身份一致性正则化（二阶稳定）
-                    #
-                    # 组合: L = w_direct * L_direct + w_eco * (L_eco_quad + L_id + L_ent)
-                    # ═══════════════════════════════════════════════════
+                # ═══════════════════════════════════════════════════
+                # Direct Metric Cluster Loss
+                #
+                # 度量场 → 占位耦合（学边界）
+                #        → Sinkhorn 软分配（特征→原型 相似度）
+                #        → 直接最小化簇内测地距离
+                #
+                # 替代 InfoNCE — 消除黎曼空间中的甜区脆弱性
+                # ═══════════════════════════════════════════════════
 
-                    # 特征扩散（可选）
-                    if diff_K > 0:
-                        A = compute_geodesic_affinity(mus, metric_field, K=diff_K,
-                                                       tau_max_factor=3.0, s_factor=0.1)
-                        diffused_feats = feature_diffusion(feats, A, alpha=diff_alpha, T=diff_T)
-                        diff_val = ((diffused_feats - feats) ** 2).mean().item()
-                        cluster_feats = diffused_feats
-                    else:
-                        diff_val = 0.0
-                        cluster_feats = feats
-
-                    # ── KMeans init at phase2_start ──
-                    if epoch == phase2_start:
-                        with torch.no_grad():
-                            mus_np = mus.cpu().numpy()
-                            labels, balance = balanced_kmeans(mus_np, n_clusters)
-
-                            # Init DirectCluster prototypes
-                            direct_cluster.init_prototypes(cluster_feats.detach(),
-                                                           torch.from_numpy(labels).to(device))
-                            # Init ECO prototypes
-                            eco_cluster.init_prototypes(cluster_feats.detach(),
-                                                        torch.from_numpy(labels).to(device))
-
-                            # Init atom features
-                            feat_dim = cluster_feats.shape[1]
-                            for c in range(n_clusters):
-                                mask = labels == c
-                                if mask.sum() > 0:
-                                    base = direct_cluster.prototypes[c].detach()
-                                    for i, a in enumerate(atoms):
-                                        if mask[i]:
-                                            noise = torch.randn(feat_dim, device=device) * 0.15
-                                            a._feature.copy_(base + noise)
-
-                        direct_cluster_initialized = True
-                        eco_initialized = True
-                        print(f"  [ECO+Direct] Balanced init: "
-                              f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
-
-                    # ── DirectCluster: primary assignment signal ──
-                    loss_direct, P, dc_metrics = direct_cluster(
-                        mus, metric_field, cluster_feats
-                    )
-                    coh_val = loss_direct.item()
-                    cluster_balance_val = dc_metrics['cluster_balance']
-                    loss_primary = loss_direct * w_direct
-
-                    # ── ECO: j-invariant identity regularization ──
-                    eco_progress = min((epoch - phase2_start) / max(num_epochs - phase2_start, 1), 1.0)
-                    eco_cluster.set_progress(eco_progress)
-                    loss_eco, P_eco, eco_metrics = eco_cluster(
-                        mus, metric_field, cluster_feats
-                    )
-
-                    # ── Phase 8: collapse detection + orthogonal mutation ──
-                    if barrier_weight > 0 or sep_weight > 0:
-                        if epoch < phase2_start + 20 and eco_cluster.collapse_detected(cluster_feats, threshold=0.02):
-                            mutated = eco_cluster.orthogonal_mutation(noise_scale=0.3)
-                            if mutated:
-                                print(f"  [Phase 8] Orthogonal mutation at epoch {epoch} (feature collapse)")
-                    j_drift_val = eco_metrics.get('j_drift', 0.0)
-                    loss_eco_reg = loss_eco * w_eco
-
-                    loss_reg += loss_primary + loss_eco_reg
-
-                elif use_direct_loss:
-                    # ═══════════════════════════════════════════════════
-                    # Path 1+3: Direct Metric Cluster Loss
-                    #
-                    # 度量场 → 占位耦合（学边界）
-                    #        → Sinkhorn 软分配（特征→原型 相似度）
-                    #        → 直接最小化簇内测地距离
-                    #
-                    # 替代 InfoNCE — 消除黎曼空间中的甜区脆弱性
-                    # ═══════════════════════════════════════════════════
-
-                    # 特征扩散（可选，与直接聚类损失互补）
-                    if diff_K > 0:
-                        A = compute_geodesic_affinity(mus, metric_field, K=diff_K,
-                                                       tau_max_factor=3.0, s_factor=0.1)
-                        diffused_feats = feature_diffusion(feats, A, alpha=diff_alpha, T=diff_T)
-                        diff_val = ((diffused_feats - feats) ** 2).mean().item()
-                        cluster_feats = diffused_feats
-                    else:
-                        diff_val = 0.0
-                        cluster_feats = feats
-
-                    # ── KMeans init at phase2_start ──
-                    if epoch == phase2_start:
-                        with torch.no_grad():
-                            mus_np = mus.cpu().numpy()
-                            labels, balance = balanced_kmeans(mus_np, n_clusters)
-
-                            # 初始化特征原型
-                            direct_cluster.init_prototypes(cluster_feats.detach(),
-                                                           torch.from_numpy(labels).to(device))
-
-                            # 同时初始化原子特征（簇内相似，簇间不同）
-                            feat_dim = cluster_feats.shape[1]
-                            for c in range(n_clusters):
-                                mask = labels == c
-                                if mask.sum() > 0:
-                                    base = direct_cluster.prototypes[c].detach()
-                                    for i, a in enumerate(atoms):
-                                        if mask[i]:
-                                            noise = torch.randn(feat_dim, device=device) * 0.15
-                                            a._feature.copy_(base + noise)
-
-                        direct_cluster_initialized = True
-                        print(f"  [DirectCluster] Balanced init: "
-                              f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
-
-                    # Direct cluster loss: Sinkhorn assignment + geodesic compaction
-                    loss_direct, P, dc_metrics = direct_cluster(
-                        mus, metric_field, cluster_feats
-                    )
-                    loss_coh = loss_direct * w_direct
-                    coh_val = loss_direct.item()
-                    cluster_balance_val = dc_metrics['cluster_balance']
-                    loss_reg += loss_coh
-
-                else:
-                    # ── 原 InfoNCE 路径（保留用于消融实验） ──
-                    # 计算测地亲和矩阵
+                # 特征扩散（可选，与直接聚类损失互补）
+                if diff_K > 0:
                     A = compute_geodesic_affinity(mus, metric_field, K=diff_K,
                                                    tau_max_factor=3.0, s_factor=0.1)
-
-                    # 特征扩散
                     diffused_feats = feature_diffusion(feats, A, alpha=diff_alpha, T=diff_T)
-
-                    # 监控：扩散前后特征差异
                     diff_val = ((diffused_feats - feats) ** 2).mean().item()
+                    cluster_feats = diffused_feats
+                else:
+                    diff_val = 0.0
+                    cluster_feats = feats
 
-                    # InfoNCE 损失
-                    loss_coh = contrastive_coherence_loss(atoms, metric_field,
-                                                           tau=tau, pos_thresh=pos_thresh,
-                                                           neg_thresh=neg_thresh,
-                                                           var_weight=var_weight,
-                                                           diffused_feats=diffused_feats) * w_coh
-                    coh_val = loss_coh.item()
-                    loss_reg += loss_coh
+                # ── KMeans init at phase2_start ──
+                if epoch == phase2_start:
+                    with torch.no_grad():
+                        mus_np = mus.cpu().numpy()
+                        labels, balance = balanced_kmeans(mus_np, n_clusters)
 
-                    if epoch == phase2_start:
-                        # KMeans 空间先验特征初始化
-                        with torch.no_grad():
-                            mus_np = mus.cpu().numpy()
-                            labels, balance = balanced_kmeans(mus_np, n_clusters)
+                        # 初始化特征原型
+                        direct_cluster.init_prototypes(cluster_feats.detach(),
+                                                       torch.from_numpy(labels).to(device))
 
-                            feat_dim = feats.shape[1]
-                            cluster_centroids = []
-                            for c in range(n_clusters):
-                                base = torch.randn(feat_dim, device=device) * 0.5
-                                cluster_centroids.append(base)
+                        # 同时初始化原子特征（簇内相似，簇间不同）
+                        feat_dim = cluster_feats.shape[1]
+                        for c in range(n_clusters):
+                            mask = labels == c
+                            if mask.sum() > 0:
+                                base = direct_cluster.prototypes[c].detach()
+                                for i, a in enumerate(atoms):
+                                    if mask[i]:
+                                        noise = torch.randn(feat_dim, device=device) * 0.15
+                                        a._feature.copy_(base + noise)
 
-                            for i, a in enumerate(atoms):
-                                c = labels[i]
-                                noise_small = torch.randn(feat_dim, device=device) * 0.05
-                                a._feature.copy_(cluster_centroids[c] + noise_small)
+                    direct_cluster_initialized = True
+                    print(f"  [DirectCluster] Balanced init: "
+                          f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
 
-                        print(f"  [KMeans] Spatial balanced init: "
-                              f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
+                # Direct cluster loss: Sinkhorn assignment + geodesic compaction
+                loss_direct, P, dc_metrics = direct_cluster(
+                    mus, metric_field, cluster_feats
+                )
+                loss_coh = loss_direct * w_direct
+                coh_val = loss_direct.item()
+                cluster_balance_val = dc_metrics['cluster_balance']
+                loss_reg += loss_coh
         
         # 正则化损失 backward（图和渲染损失的图已释放，显存充裕）
         scaler.scale(loss_reg).backward()
@@ -662,7 +512,6 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
             'diff': diff_val,
             'pos': loss_pos_t.item(),
             'balance': cluster_balance_val,
-            'j_drift': j_drift_val,
         })
         
         if epoch % 100 == 0:
@@ -673,20 +522,12 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
             log = losses_log[-1]
             phase = "2" if epoch >= phase2_start else "1"
             if epoch >= phase2_start:
-                if use_eco:
-                    bal_str = f" B={log.get('balance', 0):.2f}"
-                    eco_str = f" jD={log.get('j_drift', 0):.4f}"
-                elif use_direct_loss:
-                    bal_str = f" B={log.get('balance', 0):.2f}"
-                    eco_str = ""
-                else:
-                    bal_str = ""
-                    eco_str = ""
+                bal_str = f" B={log.get('balance', 0):.2f}"
                 print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
                       f"T={log['total']:7.3f} R={log['render']:.3f} "
                       f"M={log['met']:.3f} V={log['vol']:.3f} "
                       f"C={log['coh']:.3f} D={log['diff']:.4f} "
-                      f"P={log['pos']:.4f}{bal_str}{eco_str} A={len(atoms)} FS={feat_std:.4f}")
+                      f"P={log.get('pos', 0):.4f}{bal_str} A={len(atoms)} FS={feat_std:.4f}")
             else:
                 print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
                       f"T={log['total']:7.3f} R={log['render']:.3f} "
@@ -770,8 +611,6 @@ if __name__ == '__main__':
     parser.add_argument('--diff-t', type=int, default=2,
                         help='Diffusion iterations T (default: 2)')
     # ── Direct cluster loss args (Path 1+3) ──
-    parser.add_argument('--use-infonce', action='store_true', default=False,
-                        help='Fall back to InfoNCE instead of direct cluster loss (for ablation)')
     parser.add_argument('--w-direct', type=float, default=2.0,
                         help='Direct cluster loss weight (default: 2.0)')
     parser.add_argument('--sinkhorn-eps', type=float, default=0.05,
@@ -780,24 +619,6 @@ if __name__ == '__main__':
                         help='Sinkhorn iterations (default: 100)')
     parser.add_argument('--ent-weight', type=float, default=0.005,
                         help='Entropy penalty weight for balanced clusters (default: 0.005)')
-    # ── ECO cluster loss args (Phase 6b) ──
-    parser.add_argument('--use-eco', action='store_true', default=False,
-                        help='Add ECO j-invariant identity regularization alongside DirectCluster')
-    parser.add_argument('--w-eco', type=float, default=0.5,
-                        help='ECO regularization weight for j-invariant stability (default: 0.5)')
-    parser.add_argument('--eco-sinkhorn-eps', type=float, default=0.05,
-                        help='ECO Sinkhorn entropy regularization (default: 0.05)')
-    parser.add_argument('--eco-sinkhorn-iters', type=int, default=50,
-                        help='ECO Sinkhorn iterations (default: 50)')
-    parser.add_argument('--eco-ent-weight', type=float, default=0.005,
-                        help='ECO entropy penalty weight (default: 0.005)')
-    parser.add_argument('--eco-id-weight', type=float, default=0.1,
-                        help='ECO j-invariant identity consistency weight (default: 0.1)')
-    # ── Phase 8: discriminant barrier + j-separation ──
-    parser.add_argument('--w-barrier', type=float, default=0.0,
-                        help='Discriminant barrier loss weight (Phase 8, default: 0.0)')
-    parser.add_argument('--w-separation', type=float, default=0.0,
-                        help='j-space separation loss weight (Phase 8, default: 0.0)')
     parser.add_argument('--num-objects', type=int, default=2,
                         help='Number of objects in synthetic scene (default: 2)')
     parser.add_argument('--quick', action='store_true', default=False,
@@ -885,21 +706,10 @@ if __name__ == '__main__':
         diff_alpha=args.diff_alpha,
         diff_T=args.diff_t,
         # Direct cluster loss hyperparams (Path 1+3)
-        use_direct_loss=not args.use_infonce,
         w_direct=args.w_direct,
         sinkhorn_eps=args.sinkhorn_eps,
         sinkhorn_iters=args.sinkhorn_iters,
         ent_weight=args.ent_weight,
-        # ECO cluster loss hyperparams (Phase 6b)
-        use_eco=args.use_eco,
-        w_eco=args.w_eco,
-        eco_sinkhorn_eps=args.eco_sinkhorn_eps,
-        eco_sinkhorn_iters=args.eco_sinkhorn_iters,
-        eco_ent_weight=args.eco_ent_weight,
-        eco_id_weight=args.eco_id_weight,
-        # Phase 8: discriminant barrier + j-separation
-        barrier_weight=args.w_barrier,
-        sep_weight=args.w_separation,
         # Seed
         seed=args.seed,
     )

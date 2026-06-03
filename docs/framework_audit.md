@@ -111,7 +111,11 @@
 
 ---
 
-## 三、ECO 理论 (4 个未证明命题) 🔴 含 3 个阻塞级
+## 三、ECO 理论 (4 个未证明命题) ⚠️ DEPRECATED（2026-06-03）
+
+> **ECO 路径已于 2026-06-03 完全废止**。实验确认 j-invariant 聚类本质病态（jDist=2.3e11，ECO ARI=0.30 vs Direct Cluster ARI=0.93）。j 是模函数映射到 ℂ∪{∞}，非欧几里得空间。
+> ECOClusterLoss、elliptic_curve.py、murmuration.py 代码已全部删除。
+> 下方缺陷保留作为历史参考——这些问题曾是该框架的核心担忧，但现在已不再需要修复。
 
 ### 缺陷 3.1 🔴 j-不变量稳定性 "定理" 末经正式证明
 
