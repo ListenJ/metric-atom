@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Temp.sh | viz_results.tar.gz</title>
+    <style type="text/css">
+        body {
+            font-size: 18px;
+            font-family: "Lucida Console", monospace;
+            color: white;
+            background-color: black;
+            text-align: center;
+        }
+
+        .main {
+            margin: 40px auto;
+            max-width: 650px;
+            line-height: 1.4;
+        }
+
+        .footer {
+            bottom: 0;
+            position: fixed;
+            width: 100%;
+            background-color: black;
+        }
+
+        a {
+            color: grey;
+            text-decoration: none;
+        }
+
+        h1, h2, h3 {
+            line-height: 1.2;
+        }
+
+        pre {
+            font-size: 12;
+            line-height: 11px;
+        }
+
+        button{
+	color:white;
+	background-color: black;
+	line-height:1.4;
+	font-size:18px;
+	font-family: "Lucidia Console", monospace;
+}
+
+        .preview {
+            margin-bottom: 80px;
+        }
+
+        td {
+            text-align: right;
+        }
+
+        th {
+            text-align: left;
+        }
+
+        table {
+            margin-left: auto;
+            margin-right: auto;
+            border-spacing: 40px 0px;
+        }
+    </style>
+</head>
+<body>
+<div class="main">
+    <a href="/" style="text-decoration: none; color: white;">
+        <pre>
+╔═════════╗ ╔═════════╗ ╔═════════╗ ╔═════════╗     ╔═════════╗ ╔══╗   ╔══╗
+╚══╗   ╔══╝ ║  ╔══════╝ ║         ║ ║   ╔══╗  ║     ║  ╔══════╝ ║  ║   ║  ║
+   ║   ║    ║  ╚════╗   ║ ╔═╗ ╔═╗ ║ ║   ╚══╝  ║     ║  ╚══════╗ ║  ╚═══╝  ║
+   ║   ║    ║  ╔════╝   ║ ║ ║ ║ ║ ║ ║  ╔══════╝     ╚══════╗  ║ ║  ╔═══╗  ║
+   ║   ║    ║  ╚══════╗ ║ ║ ║ ║ ║ ║ ║  ║       ╔══╗ ╔══════╝  ║ ║  ║   ║  ║
+   ╚═══╝    ╚═════════╝ ╚═╝ ╚═╝ ╚═╝ ╚══╝       ╚══╝ ╚═════════╝ ╚══╝   ╚══╝
+        </pre>
+    </a>
+    <p><i>~everything is temporary~</i></p>
+    <table>
+        <tr>
+            <th>Filename</th>
+            <td>viz_results.tar.gz</td>
+        </tr>
+        <tr>
+            <th>Expire Time</th>
+            <td>2026-06-06 03:18:31</td>
+        </tr>
+        <tr>
+            <th>File Size</th>
+            <td>0.22</td>
+        </tr>
+        <tr>
+            <th>Mime Type</th>
+            <td>gzip compressed data</td>
+        </tr>
+    </table>
+    <br>
+    <form method="POST"><button type="submit">Click here to download<br>viz_results.tar.gz</button></form>
+</div>
+<div class="preview">
+    
+    
+</div>
+<div class="footer">
+    <p><b>Contact:</b> temp@national.shitposting.agency </a></p>
+</div>
+</body>
+</html>
