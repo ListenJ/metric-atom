@@ -92,7 +92,7 @@ from src.rendering.volume_renderer_2d import volume_render_2d
 from src.losses.reconstruction import l1_loss
 from src.losses.metric_regularizer import metric_smoothness_loss
 from src.losses.occupancy_coupling import occupancy_coupling_loss
-from src.losses.direct_cluster import DirectClusterLoss, compute_geodesic_alignment_loss
+from src.losses.direct_cluster import DirectClusterLoss, MetricFeatureEncoder
 from src.losses.diffusion import compute_geodesic_affinity, feature_diffusion
 from src.data.synthetic_2d import generate_multi_view, get_occupancy
 from src.visualization.plot_metric import (
@@ -260,10 +260,8 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                 w_met=0.01, w_vol=0.2, w_coh=2.0, w_pos=5.0,
                 # Diffusion hyperparameters
                 diff_K=5, diff_alpha=0.5, diff_T=2,
-                # Direct cluster loss hyperparameters (Path 1+3)
+                # Direct cluster loss hyperparameters
                 w_direct=2.0, sinkhorn_eps=0.05, sinkhorn_iters=100, ent_weight=0.005,
-                # Feature-geodesic alignment (本源 — Phase 1 末期对齐)
-                w_align=0.2, align_start=150, align_eps=0.2,
                 # Random seed
                 seed=42):
     """完整训练流程 — 支持 64x64 快速验证和 128x128 训练"""
@@ -320,6 +318,10 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
     ).to(device)
     direct_cluster_initialized = False
 
+    # ── 本源：特征编码器 g(x_i) → f_i ──
+    # 替换 per-atom 独立参数，特征来自度量场本身
+    encoder = MetricFeatureEncoder(feature_dim=16).to(device)
+
     atom_params = [p for a in atoms for p in a.parameters()]
 
     optimizer_param_groups = [
@@ -330,6 +332,9 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
         optimizer_param_groups.append(
             {'params': direct_cluster.parameters(), 'lr': lr * 3}
         )
+    optimizer_param_groups.append(
+        {'params': encoder.parameters(), 'lr': lr}
+    )
     optimizer = torch.optim.Adam(optimizer_param_groups)
     scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=lr * 0.01)
     
@@ -353,7 +358,6 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
     atom_birth_epochs = {id(a): 0 for a in atoms}
     diff_val = 0.0  # 扩散相关指标（Phase 2 前保持 0）
     cluster_balance_val = 0.0  # 簇平衡度（Phase 2 前保持 0）
-    align_val = 0.0  # 特征-测地对齐损失（align_start~phase2_start）
     
     # 64×64 快速验证用更激进的参数
     is_quick = (H <= 64 and num_epochs <= 600)
@@ -446,30 +450,19 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
             
             loss_reg = loss_met + loss_vol + loss_pos_t
             
-            # ── 本源 Feature-Geodesic Alignment (Phase 1 末期) ──
-            # 度量场 g(x) 是根源几何对象。特征空间必须在 Phase 2
-            # 启动前就保持测地邻域结构，否则 DirectCluster 的
-            # Sinkhorn 分配对测地距离是随机的 — 导致 ARI~0.03 的
-            # 坏种子。
-            #
-            # L_align = KL(P_g || P_f)
-            # P_g ∝ exp(-D²_g/ε)  — 测地邻域 (detached, 度量场是老师)
-            # P_f ∝ exp(cos_sim/ε) — 特征相似度 (学生, 仅特征收梯度)
-            if w_align > 0 and align_start <= epoch < phase2_start:
-                mus_a = torch.stack([a.position for a in atoms])
-                feats_a = torch.stack([a._feature for a in atoms])
-                with amp_ctx:
-                    loss_align = compute_geodesic_alignment_loss(
-                        feats_a, mus_a, metric_field, epsilon=align_eps
-                    )
-                    loss_reg += loss_align * w_align
-                align_val = loss_align.item()
-            else:
-                align_val = 0.0
+            # ── 本源：特征直接从度量场生成 g(x_i) → f_i ──
+            # 度量场是唯一几何对象。编码器 Φ 将其映射到特征空间。
+            # 重构梯度 → metric_field → Φ → feature_contrib → 渲染
+            # 聚类梯度 → Φ → metric_field（DirectCluster 直达度量场）
+            # 无需对齐 loss，无需 per-atom 独立参数。
+            mus = torch.stack([a.position for a in atoms])
+            feats = encoder(mus, metric_field)  # (N, 16), grad to encoder+metric
+
+            # 同步到原子 buffer（渲染器从 buffer 读取特征）
+            for i, a in enumerate(atoms):
+                a._feature.data = feats[i].detach()
             
             if epoch >= phase2_start:
-                mus = torch.stack([a.position for a in atoms])
-                feats = torch.stack([a._feature for a in atoms])
 
                 # ═══════════════════════════════════════════════════
                 # Direct Metric Cluster Loss
@@ -492,30 +485,17 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                     diff_val = 0.0
                     cluster_feats = feats
 
-                # ── KMeans init at phase2_start ──
-                if epoch == phase2_start:
-                    with torch.no_grad():
-                        mus_np = mus.cpu().numpy()
-                        labels, balance = balanced_kmeans(mus_np, n_clusters)
+                    # ── KMeans only for prototype init, features come from encoder ──
+                    if epoch == phase2_start:
+                        with torch.no_grad():
+                            mus_np = mus.cpu().numpy()
+                            labels, balance = balanced_kmeans(mus_np, n_clusters)
+                            direct_cluster.init_prototypes(cluster_feats.detach(),
+                                                           torch.from_numpy(labels).to(device))
 
-                        # 初始化特征原型
-                        direct_cluster.init_prototypes(cluster_feats.detach(),
-                                                       torch.from_numpy(labels).to(device))
-
-                        # 同时初始化原子特征（簇内相似，簇间不同）
-                        feat_dim = cluster_feats.shape[1]
-                        for c in range(n_clusters):
-                            mask = labels == c
-                            if mask.sum() > 0:
-                                base = direct_cluster.prototypes[c].detach()
-                                for i, a in enumerate(atoms):
-                                    if mask[i]:
-                                        noise = torch.randn(feat_dim, device=device) * 0.05
-                                        a._feature.copy_(base + noise)
-
-                    direct_cluster_initialized = True
-                    print(f"  [DirectCluster] Balanced init: "
-                          f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
+                        direct_cluster_initialized = True
+                        print(f"  [DirectCluster] Balanced init: "
+                              f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
 
                     # ── Feature-geodesic alignment check ──
                     # Verify that Sinkhorn assignments from initialized features
@@ -605,7 +585,6 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
             'coh': coh_val,
             'diff': diff_val,
             'pos': loss_pos_t.item(),
-            'align': align_val,
             'balance': cluster_balance_val,
         })
         
@@ -624,12 +603,11 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                       f"C={log['coh']:.3f} D={log['diff']:.4f} "
                       f"P={log.get('pos', 0):.4f}{bal_str} A={len(atoms)} FS={feat_std:.4f}")
             else:
-                align_str = f" Al={log.get('align', 0):.3f}" if log.get('align', 0) > 0 else ""
                 print(f"  [{epoch:4d}/{num_epochs}|P{phase}] "
                       f"T={log['total']:7.3f} R={log['render']:.3f} "
                       f"M={log['met']:.3f} V={log['vol']:.3f} "
-                      f"C={log['coh']:.3f} P={log['pos']:.4f}"
-                      f"{align_str} A={len(atoms)} FS={feat_std:.4f}")
+                      f"C={log['coh']:.3f} P={log['pos']:.4f} "
+                      f"A={len(atoms)} FS={feat_std:.4f}")
             
             if not quick_mode:
                 plot_render_comparison(pred_color, target_img, H, W, epoch, output_path)
@@ -715,13 +693,6 @@ if __name__ == '__main__':
                         help='Sinkhorn iterations (default: 100)')
     parser.add_argument('--ent-weight', type=float, default=0.005,
                         help='Entropy penalty weight for balanced clusters (default: 0.005)')
-    # ── Feature-geodesic alignment (本源) ──
-    parser.add_argument('--w-align', type=float, default=0.2,
-                        help='Geodesic alignment weight (default: 0.2, 0=disable)')
-    parser.add_argument('--align-start', type=int, default=150,
-                        help='Epoch to start alignment (default: 150)')
-    parser.add_argument('--align-eps', type=float, default=0.2,
-                        help='Alignment temperature (default: 0.2)')
     parser.add_argument('--num-objects', type=int, default=2,
                         help='Number of objects in synthetic scene (default: 2)')
     parser.add_argument('--quick', action='store_true', default=False,
@@ -813,10 +784,6 @@ if __name__ == '__main__':
         sinkhorn_eps=args.sinkhorn_eps,
         sinkhorn_iters=args.sinkhorn_iters,
         ent_weight=args.ent_weight,
-        # Feature-geodesic alignment (本源)
-        w_align=args.w_align,
-        align_start=args.align_start,
-        align_eps=args.align_eps,
         # Seed
         seed=args.seed,
     )

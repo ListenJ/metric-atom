@@ -31,7 +31,7 @@ class Atom2D(BaseAtom):
         self._mu = nn.Parameter(mu.clone())
         self._log_r = nn.Parameter(torch.log(torch.tensor(radius, dtype=mu.dtype, device=mu.device)))
         self._color = nn.Parameter(color.clone())
-        self._feature = nn.Parameter(torch.randn(feature_dim, dtype=mu.dtype, device=mu.device) * 0.1)
+        self.register_buffer('_feature', torch.randn(feature_dim, dtype=mu.dtype, device=mu.device) * 0.1)
         self._logit_eps = nn.Parameter(torch.logit(torch.tensor(eps, dtype=mu.dtype, device=mu.device)))
     
     @property

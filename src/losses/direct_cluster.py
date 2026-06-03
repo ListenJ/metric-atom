@@ -229,6 +229,50 @@ class DirectClusterLoss(nn.Module):
         return loss, P, metrics
 
 
+class MetricFeatureEncoder(nn.Module):
+    """
+    Source features from the metric field itself. [本源]
+
+    Instead of per-atom learnable parameters f_i, features are
+    a deterministic function of the local metric tensor:
+
+        f_i = Φ(g(x_i))   where Φ is a lightweight MLP.
+
+    This closes the feature-geodesic gap: when the metric changes,
+    features change automatically. No alignment loss needed.
+    DirectCluster gradient flows straight through Φ → metric field.
+
+    Input: 3 unique entries of the 2×2 SPD metric tensor g(x_i)
+    Output: feature_dim-dimensional feature vector
+    """
+
+    def __init__(self, feature_dim=16):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3, 32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.ReLU(),
+            nn.Linear(32, feature_dim),
+        )
+
+    def forward(self, mus, metric_field):
+        """
+        Args:
+            mus: (N, 2) atom positions
+            metric_field: MetricField2D, differentiable
+
+        Returns:
+            feats: (N, feature_dim) features with gradient path to metric_field
+        """
+        g = metric_field(mus)                         # (N, 2, 2)
+        g11 = g[:, 0, 0]                               # (N,)
+        g12 = g[:, 0, 1]                               # (N,)
+        g22 = g[:, 1, 1]                               # (N,)
+        g_flat = torch.stack([g11, g12, g22], dim=-1)  # (N, 3)
+        return self.net(g_flat)
+
+
 def compute_geodesic_alignment_loss(features, mus, metric_field, epsilon=0.2):
     """
     Feature-geodesic alignment loss: KL(P_g || P_f)  [本源]
