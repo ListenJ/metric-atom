@@ -17,27 +17,73 @@ from sklearn.cluster import KMeans
 import warnings
 
 
-def balanced_kmeans(mus_np, n_clusters, random_state=42, max_attempts=20, min_balance=0.5):
+def balanced_kmeans(mus_np, n_clusters, random_state=42, max_attempts=30, min_balance=0.3):
     """
-    Run KMeans with multiple seeds, pick the most balanced split.
-    min_balance = min(cluster_sizes) / max(cluster_sizes).
+    Run KMeans with multiple seeds, select the best using combined score:
+    quality = balance × separation_ratio.
+
+    separation_ratio = mean(inter-cluster distances) / mean(intra-cluster distances).
+    This rewards clusters that are well-separated AND internally compact.
+
+    Falls back to pure balance if all attempts have low separation.
     """
     best_labels = None
-    best_balance = 0.0
+    best_score = -1.0
+    fallback_labels = None
+    fallback_balance = 0.0
+
     for attempt in range(max_attempts):
+        rs = random_state + attempt * 7
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            kmeans = KMeans(n_clusters=n_clusters, random_state=random_state + attempt * 7,
-                            n_init=3, max_iter=100)
+            kmeans = KMeans(n_clusters=n_clusters, random_state=rs,
+                            n_init=5, max_iter=200)
             labels = kmeans.fit_predict(mus_np)
+            centers = kmeans.cluster_centers_
+
         counts = np.bincount(labels, minlength=n_clusters)
-        balance = counts.min() / counts.max()
-        if balance >= min_balance:
-            return labels, balance
-        if balance > best_balance:
-            best_balance = balance
+        balance = counts.min() / (counts.max() + 1e-10)
+
+        # Track best balance as fallback
+        if balance > fallback_balance:
+            fallback_balance = balance
+            fallback_labels = labels
+
+        # Quality = balance × separation ratio
+        # Use feature (mus) distances: inter-cluster / intra-cluster
+        if n_clusters >= 2:
+            # Inter-cluster: mean distance between centroids
+            inter_dists = np.linalg.norm(
+                centers[:, None, :] - centers[None, :, :], axis=-1)
+            np.fill_diagonal(inter_dists, 0)
+            inter_mean = inter_dists.sum() / (n_clusters * (n_clusters - 1) + 1e-10)
+
+            # Intra-cluster: mean distance within each cluster
+            intra_means = []
+            for c in range(n_clusters):
+                mask = labels == c
+                if mask.sum() > 1:
+                    pts = mus_np[mask]
+                    dists = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=-1)
+                    intra_means.append(dists.sum() / (mask.sum() * (mask.sum() - 1) + 1e-10))
+            intra_mean = np.mean(intra_means) if intra_means else 1.0
+
+            sep_ratio = inter_mean / (intra_mean + 1e-10)
+        else:
+            sep_ratio = 1.0
+
+        quality = balance * sep_ratio
+        if quality > best_score:
+            best_score = quality
             best_labels = labels
-    return best_labels, best_balance
+
+    # Return best quality; fall back to best balance if quality didn't work
+    if best_labels is not None:
+        counts = np.bincount(best_labels, minlength=n_clusters)
+        balance = counts.min() / (counts.max() + 1e-10)
+        return best_labels, balance
+    counts = np.bincount(fallback_labels, minlength=n_clusters)
+    return fallback_labels, counts.min() / (counts.max() + 1e-10)
 
 from src.geometry.metric_field import MetricField2D
 from src.atoms.atom_2d import Atom2D
@@ -440,7 +486,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                                 base = direct_cluster.prototypes[c].detach()
                                 for i, a in enumerate(atoms):
                                     if mask[i]:
-                                        noise = torch.randn(feat_dim, device=device) * 0.15
+                                        noise = torch.randn(feat_dim, device=device) * 0.05
                                         a._feature.copy_(base + noise)
 
                     direct_cluster_initialized = True
