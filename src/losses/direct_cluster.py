@@ -227,3 +227,66 @@ class DirectClusterLoss(nn.Module):
         }
 
         return loss, P, metrics
+
+
+def compute_geodesic_alignment_loss(features, mus, metric_field, epsilon=0.2):
+    """
+    Feature-geodesic alignment loss: KL(P_g || P_f)  [本源]
+
+    First-principles derivation:
+        The metric field g(x) is the root geometric object. It defines
+        geodesic distances d_g(x_i, x_j) — "what is close" in perceptual
+        space. Features f_i should embed atoms such that angular distance
+        in feature space preserves geodesic neighborhood structure.
+
+        P_g(i,j) ∝ exp(-D²_ij / ε_a)  — geodesic neighborhood distribution
+        P_f(i,j) ∝ exp(cos_sim(i,j) / ε_a)  — feature similarity distribution
+
+        L = KL(P_g || P_f)  — geodesic is teacher, feature is student
+
+    Key design:
+        - Geodesic distances are detached from the metric field gradient.
+          The metric is trained for reconstruction — L_align must not
+          distort the geometry. Only features receive alignment signal.
+        - D² is normalized by per-batch max to match cos_sim's [-1,1] range.
+        - KL is scale-invariant: only ranking matters, no need for exact
+          distance matching. Neighborhood preservation is sufficient.
+
+    Args:
+        features: (N, D) atom features, learnable parameters
+        mus: (N, d) atom positions
+        metric_field: MetricField2D instance
+        epsilon: alignment temperature (default 0.2 — softer than
+                 sinkhorn_eps=0.05; broad structure, not sharp clustering)
+
+    Returns:
+        loss: scalar alignment loss
+    """
+    N = features.shape[0]
+    if N < 2:
+        return torch.tensor(0.0, device=features.device,
+                          dtype=features.dtype, requires_grad=True)
+
+    # ── 1. Geodesic distances (DETACHED — metric is ground truth) ──
+    with torch.no_grad():
+        D2 = compute_pairwise_geodesic_sq(mus, metric_field)
+
+    # Normalize to match cos_sim scale [-1, 1] ≈ [-D2_max, 0]
+    # Division by batch max keeps distribution shape, avoids outlier sensitivity
+    D2_norm = D2 / D2.max().clamp(min=1e-8)  # ∈ [0, 1]
+
+    # ── 2. Feature cosine similarity ──
+    feats_norm = F.normalize(features, dim=-1)
+    cos_sim = feats_norm @ feats_norm.T  # ∈ [-1, 1]
+
+    # ── 3. Soft assignments ──
+    # P_g: closer in geodesic distance → higher probability
+    # P_f: more similar features → higher probability
+    log_P_g = torch.log_softmax(-D2_norm / epsilon, dim=-1)  # (N, N)
+    log_P_f = torch.log_softmax(cos_sim / epsilon, dim=-1)   # (N, N)
+    P_g = torch.exp(log_P_g)
+
+    # ── 4. KL(P_g || P_f): Σ_i Σ_j P_g(i,j) · [log P_g(i,j) - log P_f(i,j)] ──
+    loss = (P_g * (log_P_g - log_P_f)).sum(dim=-1).mean()
+
+    return loss
