@@ -1,5 +1,5 @@
 """
-特征扩散模块 — Feature Diffusion Module v0.3
+特征扩散模块 — Feature Diffusion Module v0.4
 
 基于度量场定义的测地亲和度矩阵，对原子特征进行确定性平滑。
 使特征平滑成为度量场学习的自然涌现。
@@ -9,6 +9,13 @@
     亲和矩阵: A_ij = exp(-d²_ij / (2σ_iσ_j)) · sigmoid((τ_max - d_ij) / s)
     自适应 σ: σ_i = d_g(μ_i, μ_{neighbor_K}), K=5~10
     特征扩散: F^{(t+1)} = (1-α)F^{(t)} + α·S·F^{(t)},  S = D⁻¹A
+
+限制:
+    - 测地高斯核不保证 PSD（Schoenberg 定理仅适用于欧几里得嵌入）。
+      行随机 S = D⁻¹A 用于马尔可夫扩散时，非 PSD 不影响收敛性
+      （Perron-Frobenius 定理保证 S 的谱半径 ≤ 1）。
+    - 如需谱聚类，在 eigenvalue decomposition 前对 A 进行特征值截断。
+    - A 通过 A = (A + Aᵀ)/2 强制对称。
 """
 
 import torch
@@ -59,6 +66,9 @@ def compute_geodesic_affinity(mus, metric_field, K=5, tau_max_factor=3.0, s_fact
     soft_mask = torch.sigmoid((tau_max - d) / s)
 
     A = A * soft_mask
+
+    # ── 强制对称（消除数值误差产生的不对称）──
+    A = 0.5 * (A + A.t())
 
     # 排除自身
     A.fill_diagonal_(0.0)

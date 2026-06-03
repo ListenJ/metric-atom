@@ -20,7 +20,7 @@ from src.rendering.volume_renderer_2d import volume_render_3d
 from src.losses.reconstruction import l1_loss
 from src.losses.metric_regularizer import metric_smoothness_loss_3d
 from src.losses.occupancy_coupling import occupancy_coupling_loss
-from src.losses.coherence import coherence_loss
+# [HISTORICAL] coherence_loss removed — 3D clustering is TBD (DirectClusterLoss 3D extension pending)
 from src.data.synthetic_3d import generate_multi_view_3d
 from src.visualization.plot_3d import (
     plot_render_comparison_3d, plot_atom_scatter_3d,
@@ -313,10 +313,7 @@ def train_scene_3d(H=128, W=128, res_x=32, res_y=32, res_z=32,
             
             loss_reg = loss_met + loss_vol + loss_pos_t
             
-            if epoch >= phase2_start:
-                loss_coh = coherence_loss(atoms, metric_field, repulsion_weight=repulsion_weight) * w_coh
-                coh_val = loss_coh.item()
-                loss_reg += loss_coh
+            # [TBD] 3D DirectClusterLoss — 当前禁用，coh_val 保持 0.0
         
         scaler.scale(loss_reg).backward()
         
