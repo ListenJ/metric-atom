@@ -136,9 +136,13 @@ def train_scene(H=32, W=32, num_atoms=50, num_epochs=600, num_views=8,
     atoms = create_atoms(num_atoms, device, seed=seed,
                          occupancy=frame_occupancy[0])
 
+    # Shared state → color decoder (forces states to encode visual info)
+    state_decoder = torch.nn.Linear(16, 3).to(device)
+
     optimizer = torch.optim.Adam([
         {'params': metric_field.parameters(), 'lr': lr},
         {'params': [p for a in atoms for p in a.parameters()], 'lr': lr * 3},
+        {'params': state_decoder.parameters(), 'lr': lr},
     ])
     scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=lr * 0.01)
 
@@ -239,22 +243,18 @@ def train_scene(H=32, W=32, num_atoms=50, num_epochs=600, num_views=8,
                 atom_colors = torch.stack([a._color for a in atoms])
                 loss_pred = masked_prediction_loss(
                     mus, states_prop, metric_field,
-                    masked_px, target_c, atom_colors
+                    masked_px, target_c, atom_colors,
+                    state_decoder=state_decoder
                 ) * w_predict
             else:
                 loss_pred = torch.tensor(0.0, device=device)
 
-            # Feature diffusion
+            # Feature diffusion (smoothing for state visualization only)
             diff_val = 0.0
             if diff_K > 0:
                 A = compute_geodesic_affinity(mus, metric_field, K=diff_K)
                 states_diff = feature_diffusion(states_prop, A, alpha=0.5, T=2)
                 diff_val = ((states_diff - states_prop) ** 2).mean().item()
-                # Smooth state update via diffusion
-                with torch.no_grad():
-                    for i, a in enumerate(atoms):
-                        a._state.data = (1 - state_alpha) * a._state.data + \
-                                        state_alpha * states_diff[i]
 
             loss_reg = loss_met + loss_vol + loss_pos_t + loss_so + loss_pred
 

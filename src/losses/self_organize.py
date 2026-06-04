@@ -102,25 +102,29 @@ def self_organization_loss(mus, states, metric_field):
 
 
 def masked_prediction_loss(mus, states, metric_field,
-                            masked_px, target_colors, atom_colors, k=5):
+                            masked_px, target_colors, atom_colors,
+                            state_decoder=None, k=5):
     """
     Predict masked pixel colors via geodesic neighbor voting.
 
     For each masked pixel p:
-      1. Find k geodesic nearest atoms
-      2. Each atom votes a color: pred = MLP(state)  (simplified: use atom._color)
-      3. Weighted average: pred(p) = Σ w_i * color_i
+      1. Find geodesic nearest atoms (soft weights via metric field)
+      2. Each atom votes: pred = state_decoder(state_i) if decoder else atom._color
+      3. Weighted average: pred(p) = Σ w_i * pred_i
 
-    During early training this is inaccurate → gradient shapes the metric
-    and states to improve prediction.
+    The decoder (nn.Linear) is shared across all atoms — states must
+    learn to encode color information for prediction to work.
+    This forces states to become "visually aware."
 
     Args:
         mus: (N, 2) atom positions
-        states: (N, D) atom states (for future MLP decode, currently unused)
+        states: (N, D) atom states — used for prediction via decoder
         metric_field: MetricField2D
         masked_px: (M, 2) masked pixel positions in [0,1]²
         target_colors: (M, 3) ground truth colors
-        k: number of neighbor atoms to vote
+        atom_colors: (N, 3) atom colors (fallback if no decoder)
+        state_decoder: nn.Linear(D, 3) or None — shared state→color mapping
+        k: number of neighbor atoms (unused, soft weights on all atoms)
 
     Returns:
         loss: scalar L1 prediction error
@@ -144,7 +148,14 @@ def masked_prediction_loss(mus, states, metric_field,
     eps = D2_px.median().clamp(min=1e-4)
     weights = torch.softmax(-D2_px / eps, dim=-1)  # (M, N)
 
-    # Color voting: each atom's color weighted by geodesic proximity
-    pred_colors = weights @ atom_colors  # (M, 3)
+    # Color voting:
+    # With decoder: each atom votes color = decoder(state_i)
+    # Without: fall back to atom's learned color
+    if state_decoder is not None:
+        atom_preds = state_decoder(states)  # (N, 3)
+    else:
+        atom_preds = atom_colors
+
+    pred_colors = weights @ atom_preds  # (M, 3)
 
     return F.l1_loss(pred_colors, target_colors)
