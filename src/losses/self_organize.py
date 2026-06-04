@@ -17,6 +17,10 @@ def compute_geodesic_neighbors(mus, metric_field, k=5):
     """
     Find top-k geodesic nearest neighbors for each atom.
 
+    Uses per-atom adaptive sigma (K-th neighbor distance) instead of a
+    global median, so the affinity remains informative even when atoms
+    converge and global distances shrink.
+
     Args:
         mus: (N, 2) atom positions
         metric_field: MetricField2D
@@ -28,12 +32,17 @@ def compute_geodesic_neighbors(mus, metric_field, k=5):
     """
     with torch.no_grad():
         D2 = compute_pairwise_geodesic_sq(mus, metric_field)  # (N, N)
-    D2 = D2 + torch.eye(D2.shape[0], device=D2.device) * 1e10  # exclude self
-    _, indices = D2.topk(k=k, dim=1, largest=False)  # (N, k)
+    D2_masked = D2 + torch.eye(D2.shape[0], device=D2.device) * 1e10  # exclude self
+    _, indices = D2_masked.topk(k=k, dim=1, largest=False)  # (N, k)
 
-    # Soft weights: w_ij = exp(-D2_ij / sigma^2)
-    sigma = D2[D2 < 1e9].median().sqrt().clamp(min=1e-4)
-    A = torch.exp(-D2 / (2 * sigma * sigma))
+    # Per-atom adaptive sigma: sigma_i = sqrt(D2 to k-th neighbor)
+    D2_sorted = D2_masked.topk(k=k, dim=1, largest=False)[0]  # (N, k)
+    sigma_i = D2_sorted[:, -1].sqrt().clamp(min=1e-4)  # (N,) k-th neighbor distance
+
+    # Symmetric pairwise sigma: sigma_ij = sqrt(sigma_i * sigma_j)
+    sigma_prod = sigma_i.unsqueeze(1) * sigma_i.unsqueeze(0)  # (N, N)
+
+    A = torch.exp(-D2 / (2 * sigma_prod))
     A.fill_diagonal_(0.0)
     # Row normalize
     row_sums = A.sum(dim=1, keepdim=True).clamp(min=1e-10)
@@ -63,11 +72,16 @@ def state_propagation(states, weights, alpha=0.3):
     return (1 - alpha) * states + alpha * neighbor_mean
 
 
-def self_organization_loss(mus, states, metric_field):
+def self_organization_loss(mus, states, metric_field, K=5):
     """
     Self-organization force through the metric field.
 
-    L_selforg = -Σ_{i,j} cos_sim(s_i, s_j) * exp(-d_g(i,j)² / σ²)
+    L_selforg = -Σ_{i,j} cos_sim(s_i, s_j) * exp(-d_g(i,j)² / (2 σ_i σ_j))
+
+    Uses per-atom adaptive sigma (K-th geodesic neighbor distance) so the
+    kernel bandwidth tracks local density instead of collapsing with the
+    global distance scale.  This prevents gradient vanishing in late
+    training when atoms have converged and global median(D²) → 0.
 
     Intuition:
       - cos_sim(s_i, s_j) > 0: similar states → attract (reduce geodesic)
@@ -78,6 +92,7 @@ def self_organization_loss(mus, states, metric_field):
         mus: (N, 2) atom positions
         states: (N, D) atom states
         metric_field: MetricField2D
+        K: neighbor count for adaptive sigma
 
     Returns:
         loss: scalar
@@ -90,12 +105,23 @@ def self_organization_loss(mus, states, metric_field):
     s_norm = F.normalize(states, dim=-1)
     S = s_norm @ s_norm.T  # (N, N), in [-1, 1]
 
-    # Geodesic distance
+    # Geodesic distance (differentiable — gradients flow through D2)
     D2 = compute_pairwise_geodesic_sq(mus, metric_field)
 
-    # Gaussian kernel: close in geodesic → high weight
-    sigma = D2.median().sqrt().clamp(min=1e-4)
-    W = torch.exp(-D2 / (2 * sigma * sigma))
+    # ── Adaptive sigma: per-atom K-th neighbor distance ──
+    # Use detached D2 for sigma computation so bandwidth selection
+    # doesn't interfere with the main gradient signal.
+    with torch.no_grad():
+        D2_masked = D2.detach() + torch.eye(N, device=D2.device) * 1e10
+        k_actual = min(K, N - 1)
+        D2_knn = D2_masked.topk(k=k_actual, dim=1, largest=False)[0]  # (N, k)
+        sigma_i = D2_knn[:, -1].sqrt().clamp(min=1e-4)  # (N,)
+
+    # Symmetric pairwise bandwidth: σ_ij = √(σ_i · σ_j)
+    sigma_prod = sigma_i.unsqueeze(1) * sigma_i.unsqueeze(0)  # (N, N)
+
+    # Gaussian kernel with adaptive per-pair bandwidth
+    W = torch.exp(-D2 / (2 * sigma_prod))
 
     # Loss: -S * W → similar states close in geodesic → low loss
     return -(S * W).sum() / (N * N)

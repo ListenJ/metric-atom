@@ -33,7 +33,7 @@ def plot_render_comparison(pred_color, target_img, H, W, step, output_path):
 def plot_atom_distribution(atoms, H, W, step, output_path):
     """原子分布图：中心位置按特征相似度着色"""
     mus = np.stack([a.position.detach().cpu().numpy() for a in atoms])  # (N, 2)
-    feats = np.stack([a._feature.detach().cpu().numpy() for a in atoms])  # (N, D)
+    feats = np.stack([(a._feature if hasattr(a, '_feature') else a._state).detach().cpu().numpy() for a in atoms])  # (N, D)
     eps_vals = np.array([a.existence_prob.detach().cpu().item() for a in atoms])
     colors = np.stack([a._color.detach().cpu().numpy().clip(0, 1) for a in atoms])
     
@@ -132,7 +132,7 @@ def plot_metric_field(metric_field, H, W, step, output_path):
 
 def plot_feature_similarity(atoms, step, output_path):
     """特征相似度矩阵：N×N 热力图"""
-    feats = np.stack([a._feature.detach().cpu().numpy() for a in atoms])
+    feats = np.stack([(a._feature if hasattr(a, '_feature') else a._state).detach().cpu().numpy() for a in atoms])
     
     # 余弦相似度矩阵
     feats_norm = feats / (np.linalg.norm(feats, axis=-1, keepdims=True) + 1e-8)
@@ -181,7 +181,7 @@ def evaluate_clustering(atoms, masks, H, W):
     Returns:
         metrics: dict with ARI, NMI, num_clusters_found
     """
-    feats = np.stack([a._feature.detach().cpu().numpy() for a in atoms])
+    feats = np.stack([(a._feature if hasattr(a, '_feature') else a._state).detach().cpu().numpy() for a in atoms])
     mus = np.stack([a.position.detach().cpu().numpy() for a in atoms])
     
     # 对特征做 KMeans
@@ -243,8 +243,15 @@ def plot_loss_curves(losses_log, output_path, phase2_start):
     axes[1, 0].plot(epochs, [d['met'] for d in losses_log])
     axes[1, 0].set_title('Metric Smoothness')
     
-    axes[1, 1].plot(epochs, [d['coh'] for d in losses_log])
-    axes[1, 1].set_title('Coherence Loss')
+    if 'coh' in losses_log[0]:
+        axes[1, 1].plot(epochs, [d['coh'] for d in losses_log])
+        axes[1, 1].set_title('Coherence Loss')
+    elif 'selforg' in losses_log[0]:
+        axes[1, 1].plot(epochs, [d['selforg'] for d in losses_log])
+        axes[1, 1].set_title('Self-Org Loss')
+    else:
+        axes[1, 1].plot(epochs, [d['vol'] for d in losses_log])
+        axes[1, 1].set_title('Volume Loss')
     axes[1, 1].axvline(x=phase2_start, color='red', linestyle='--', alpha=0.5)
     
     plt.tight_layout()
@@ -292,7 +299,14 @@ def generate_evaluation_report(atoms, metric_field, images, masks, losses_log,
     print(f"    Render: {final['render']:.4f}")
     print(f"    Metric: {final['met']:.4f}")
     print(f"    OccVol: {final['vol']:.4f}")
-    print(f"    Cohere: {final['coh']:.4f}")
+    if 'coh' in final:
+        print(f"    Cohere: {final['coh']:.4f}")
+    if 'selforg' in final:
+        print(f"    SelfOrg: {final['selforg']:.4f}")
+    if 'predict' in final:
+        print(f"    Predict: {final['predict']:.4f}")
+    if 'pos' in final:
+        print(f"    PosReg: {final['pos']:.4f}")
     
     # 5. 生成所有可视化
     print(f"\n[5] Generating visualizations...")
