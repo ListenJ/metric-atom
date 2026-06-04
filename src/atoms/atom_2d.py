@@ -20,7 +20,7 @@ class Atom2D(BaseAtom):
     距离计算基于局部度量场提供的马氏距离。
     """
     
-    def __init__(self, mu, radius, color, feature_dim=16, eps=0.5):
+    def __init__(self, mu, radius, color, feature_dim=32, eps=0.5):
         super().__init__()
         
         if mu.dim() != 1 or mu.shape[0] != 2:

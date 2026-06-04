@@ -119,7 +119,7 @@ class DirectClusterLoss(nn.Module):
                     initialized by KMeans at Phase 2 start
     """
 
-    def __init__(self, n_clusters=2, feature_dim=16,
+    def __init__(self, n_clusters=2, feature_dim=32,
                  sinkhorn_eps=0.1, sinkhorn_iters=50,
                  ent_weight=0.005):
         super().__init__()

@@ -92,7 +92,7 @@ from src.rendering.volume_renderer_2d import volume_render_2d
 from src.losses.reconstruction import l1_loss
 from src.losses.metric_regularizer import metric_smoothness_loss
 from src.losses.occupancy_coupling import occupancy_coupling_loss
-from src.losses.direct_cluster import DirectClusterLoss, compute_pairwise_geodesic_sq
+from src.losses.direct_cluster import DirectClusterLoss
 from src.losses.diffusion import compute_geodesic_affinity, feature_diffusion
 from src.data.synthetic_2d import generate_multi_view, get_occupancy
 from src.visualization.plot_metric import (
@@ -100,26 +100,6 @@ from src.visualization.plot_metric import (
     plot_feature_similarity, plot_loss_curves, generate_evaluation_report
 )
 from src.visualization.plot_atoms import plot_atom_scatter
-
-
-def geodesic_kmeans_init(mus_t, metric_field, n_clusters):
-    """
-    KMeans on geodesic distance embedding — 本源方案A.
-
-    Instead of clustering on Euclidean positions (which ignores the
-    learned metric structure), we cluster on geodesic distance patterns.
-    Each atom's feature is its vector of geodesic distances to all
-    other atoms — atoms in the same geodesic cluster share similar
-    distance patterns.
-
-    This ensures KMeans init and DirectCluster (Sinkhorn on geodesics)
-    operate in the same space.
-    """
-    with torch.no_grad():
-        D2 = compute_pairwise_geodesic_sq(mus_t, metric_field)
-    D2_np = D2.cpu().numpy()
-    # Each row of D2 is a feature vector: geodesic signature of that atom
-    return balanced_kmeans(D2_np, n_clusters)
 
 
 def create_atoms(num_atoms, device, seed=42, radius_min=0.25, radius_max=0.35, occupancy=None):
@@ -142,7 +122,7 @@ def create_atoms(num_atoms, device, seed=42, radius_min=0.25, radius_max=0.35, o
                 mu = torch.tensor([u, v], device=device, dtype=torch.float32)
                 radius = radius_min + torch.rand(1, device=device, dtype=torch.float32).item() * (radius_max - radius_min)
                 color = torch.rand(3, device=device, dtype=torch.float32)
-                atom = Atom2D(mu, radius=radius, color=color, feature_dim=16, eps=0.5)
+                atom = Atom2D(mu, radius=radius, color=color, feature_dim=32, eps=0.5)
                 atom.birth_epoch = 0
                 atoms.append(atom)
             print(f"  [Init] 全部 {num_atoms} 个原子初始化在物体区域 (occupancy引导)")
@@ -163,7 +143,7 @@ def create_atoms(num_atoms, device, seed=42, radius_min=0.25, radius_max=0.35, o
             mu = torch.tensor([u, v], device=device, dtype=torch.float32)
             radius = radius_min + torch.rand(1, device=device, dtype=torch.float32).item() * (radius_max - radius_min)
             color = torch.rand(3, device=device, dtype=torch.float32)
-            atom = Atom2D(mu, radius=radius, color=color, feature_dim=16, eps=0.5)
+            atom = Atom2D(mu, radius=radius, color=color, feature_dim=32, eps=0.5)
             atom.birth_epoch = 0
             atoms.append(atom)
         if len(atoms) >= num_atoms:
@@ -232,7 +212,7 @@ def seed_atoms_smart(atoms, pred_color, target_img, H, W, device,
     new_atoms = []
     for k in range(len(new_mus)):
         atom = Atom2D(new_mus[k], radius_min + torch.rand(1, device=device).item() * (radius_max - radius_min),
-                       new_colors[k], feature_dim=16, eps=0.5)
+                       new_colors[k], feature_dim=32, eps=0.5)
         atom.birth_epoch = epoch
         new_atoms.append(atom)
     
@@ -332,7 +312,7 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
 
     # ── Direct Cluster Loss 模块（Sinkhorn + 直接测地距离优化） ──
     direct_cluster = DirectClusterLoss(
-        n_clusters=n_clusters, feature_dim=16,
+        n_clusters=n_clusters, feature_dim=32,
         sinkhorn_eps=sinkhorn_eps, sinkhorn_iters=sinkhorn_iters,
         ent_weight=ent_weight
     ).to(device)
@@ -488,17 +468,16 @@ def train_scene(H=64, W=64, num_atoms=100, num_epochs=600, num_views=8, num_obje
                     diff_val = 0.0
                     cluster_feats = feats
 
-                    # ── 本源A: KMeans on geodesic distance embedding ──
-                    # Instead of position-based KMeans, use geodesic distance
-                    # patterns so init aligns with DirectCluster (same space)
+                    # ── KMeans init on atom positions ──
                     if epoch == phase2_start:
                         with torch.no_grad():
-                            labels, balance = geodesic_kmeans_init(mus, metric_field, n_clusters)
+                            mus_np = mus.cpu().numpy()
+                            labels, balance = balanced_kmeans(mus_np, n_clusters)
                             direct_cluster.init_prototypes(cluster_feats.detach(),
                                                            torch.from_numpy(labels).to(device))
 
                         direct_cluster_initialized = True
-                        print(f"  [DirectCluster] Geodesic init: "
+                        print(f"  [DirectCluster] Balanced init: "
                               f"{np.bincount(labels).tolist()} atoms per cluster (b={balance:.2f})")
 
                     # ── Feature-geodesic alignment check ──
