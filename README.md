@@ -58,6 +58,9 @@ $$\mathcal{L}_{\text{direct}} = \sum_k \frac{P[:,k]^\top D_g^2\, P[:,k]}{(\text{
 > 2026-06-03: Murmuration 代码（murmuration.py, elliptic_curve.py）已随 ECO 路径移除。Lyapunov 稳定性分析（murmuration_dynamics.md）作为理论成果保留，数值验证已通过（S¹ 离散 Murmuration Lyapunov 单调递减）。
 
 > 📐 **详细数学文档**
+>
+> 建议先读 [docs/theory_index.md](docs/theory_index.md) 获取完整导航图、阅读路径与可信度评级，再按主题深入以下文档。
+>
 > - [docs/framework_audit.md](docs/framework_audit.md)：**框架系统审计** — 34 项命题/实验/假设的数学严格性评估（17.6% 已证明，8 项阻塞级缺陷）
 > - [docs/gradient_flow_analysis.md](docs/gradient_flow_analysis.md)：Direct Cluster vs InfoNCE 梯度流分析（甜区宽度理论、Sinkhorn 最优 ε 推导、Phase 7 landscape 双稳态解释）
 > - [docs/convergence_rate_analysis.md](docs/convergence_rate_analysis.md)：收敛速率严格分析（Lipschitz 常数推导、O(1/t) 次线性收敛证明、PL 条件线性收敛、ε-条件数关系、vs InfoNCE 收敛对比）
