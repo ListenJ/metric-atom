@@ -35,8 +35,12 @@ class Atom2D(BaseAtom):
         self._mu = nn.Parameter(mu.clone())
         self._log_r = nn.Parameter(torch.log(torch.tensor(radius, dtype=mu.dtype, device=mu.device)))
         self._color = nn.Parameter(color.clone())
-        self._state = nn.Parameter(torch.randn(state_dim, dtype=mu.dtype, device=mu.device) * 0.1)
+        # State encodes "what/which object" and is decoded to color for rendering.
+        # state_dim=3 is kept as a special case for direct RGB encoding (no decoder).
+        # state_dim>3 is used with an external state_decoder in the renderer.
+        self._state = nn.Parameter(torch.rand(state_dim, dtype=mu.dtype, device=mu.device))
         self._logit_eps = nn.Parameter(torch.logit(torch.tensor(eps, dtype=mu.dtype, device=mu.device)))
+        self._state_dim = state_dim
     
     @property
     def position(self):
@@ -94,16 +98,14 @@ class Atom2D(BaseAtom):
         
         return weight, density, state_contrib
 
-    def predict_color(self):
+    def get_color(self, state_decoder=None):
         """
-        Predict RGB color from internal state.
+        Return RGB color for rendering.
         
-        A lightweight MLP decoder: state → color.
-        This is intentionally simple — the state should encode
-        enough information to reconstruct the atom's color.
-        Used for masked pixel prediction.
+        If state_dim == 3, state directly parametrizes RGB.
+        Otherwise, an external state_decoder must be provided to map state -> color.
         """
-        # Linear decode: state → RGB
-        # Not a learned function yet — uses the atom's own color
-        # as target. In future: nn.Linear(state_dim, 3) per atom.
-        return self._color
+        if state_decoder is not None:
+            return torch.sigmoid(state_decoder(self._state))
+        # Clamp to valid RGB range
+        return torch.sigmoid(self._state)
