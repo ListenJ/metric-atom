@@ -2,30 +2,32 @@ import numpy as np
 import cv2
 
 
-def generate_scene(H=128, W=128, num_objects=2, seed=None):
+def generate_scene(H=128, W=128, num_objects=2, seed=None, same_color=False):
     """
     生成包含几何形状的 2D 场景。
-    
+
     场景范围 [0, 1] x [0, 1]。
     随机生成圆、矩形。
-    
+
     Args:
         H, W: 图像分辨率
         num_objects: 物体数量 (2-4)
         seed: 随机种子
-    
+        same_color: 如果 True，所有物体使用相同颜色（用于 EXT-4 验证：
+                    掩码预测是否能区分同色物体）
+
     Returns:
         image: (H, W, 3) float32, RGB in [0, 1]
         masks: (H, W, K) float32, K 个实例掩码
     """
     if seed is not None:
         np.random.seed(seed)
-    
+
     # 背景颜色（浅灰）
     bg_color = np.array([0.9, 0.9, 0.9], dtype=np.float32)
     image = np.ones((H, W, 3), dtype=np.float32) * bg_color
     masks = []
-    
+
     colors_pool = [
         [1.0, 0.2, 0.2],  # 红
         [0.2, 0.2, 1.0],  # 蓝
@@ -33,42 +35,58 @@ def generate_scene(H=128, W=128, num_objects=2, seed=None):
         [1.0, 0.8, 0.0],  # 黄
         [1.0, 0.0, 1.0],  # 紫
     ]
+
+    # EXT-4 validation: all objects same color → forces shape/geometry cues
+    if same_color:
+        shared_color = np.array(colors_pool[0], dtype=np.float32)
+
+    # Minimum object area: ensure each object covers at least 5% of image
+    # so atoms have enough spatial support to form meaningful clusters.
+    min_area = int(0.05 * H * W)
     
     for k in range(num_objects):
-        color = np.array(colors_pool[k % len(colors_pool)], dtype=np.float32)
-        mask = np.zeros((H, W), dtype=np.float32)
+        if same_color:
+            color = shared_color
+        else:
+            color = np.array(colors_pool[k % len(colors_pool)], dtype=np.float32)
         
-        shape_type = np.random.choice(['circle', 'rectangle', 'triangle'])
-        
-        if shape_type == 'circle':
-            cx = int(np.random.uniform(0.15 * W, 0.85 * W))
-            cy = int(np.random.uniform(0.15 * H, 0.85 * H))
-            radius = int(np.random.uniform(0.08 * min(H, W), 0.25 * min(H, W)))
-            cv2.circle(mask, (cx, cy), radius, 1.0, -1)
+        # Retry until object area >= min_area
+        for _retry in range(20):
+            mask = np.zeros((H, W), dtype=np.float32)
+            shape_type = np.random.choice(['circle', 'rectangle', 'triangle'])
             
-        elif shape_type == 'rectangle':
-            x1 = int(np.random.uniform(0.1 * W, 0.5 * W))
-            y1 = int(np.random.uniform(0.1 * H, 0.5 * H))
-            x2 = int(x1 + np.random.uniform(0.2 * W, 0.4 * W))
-            y2 = int(y1 + np.random.uniform(0.2 * H, 0.4 * H))
-            x2 = min(x2, W - 1)
-            y2 = min(y2, H - 1)
-            cv2.rectangle(mask, (x1, y1), (x2, y2), 1.0, -1)
+            if shape_type == 'circle':
+                cx = int(np.random.uniform(0.25 * W, 0.75 * W))
+                cy = int(np.random.uniform(0.25 * H, 0.75 * H))
+                radius = int(np.random.uniform(0.12 * min(H, W), 0.22 * min(H, W)))
+                cv2.circle(mask, (cx, cy), radius, 1.0, -1)
+                
+            elif shape_type == 'rectangle':
+                x1 = int(np.random.uniform(0.15 * W, 0.45 * W))
+                y1 = int(np.random.uniform(0.15 * H, 0.45 * H))
+                x2 = int(x1 + np.random.uniform(0.25 * W, 0.40 * W))
+                y2 = int(y1 + np.random.uniform(0.25 * H, 0.40 * H))
+                x2 = min(x2, W - 1)
+                y2 = min(y2, H - 1)
+                cv2.rectangle(mask, (x1, y1), (x2, y2), 1.0, -1)
+                
+            elif shape_type == 'triangle':
+                pts = []
+                cx = np.random.uniform(0.25 * W, 0.75 * W)
+                cy = np.random.uniform(0.25 * H, 0.75 * H)
+                size = np.random.uniform(0.15 * min(H, W), 0.25 * min(H, W))
+                for _ in range(3):
+                    angle = np.random.uniform(0, 2 * np.pi)
+                    px = int(cx + size * np.cos(angle))
+                    py = int(cy + size * np.sin(angle))
+                    px = np.clip(px, 0, W - 1)
+                    py = np.clip(py, 0, H - 1)
+                    pts.append([px, py])
+                pts = np.array(pts, dtype=np.int32)
+                cv2.fillPoly(mask, [pts], 1.0)
             
-        elif shape_type == 'triangle':
-            pts = []
-            cx = np.random.uniform(0.2 * W, 0.8 * W)
-            cy = np.random.uniform(0.2 * H, 0.8 * H)
-            size = np.random.uniform(0.1 * min(H, W), 0.25 * min(H, W))
-            for _ in range(3):
-                angle = np.random.uniform(0, 2 * np.pi)
-                px = int(cx + size * np.cos(angle))
-                py = int(cy + size * np.sin(angle))
-                px = np.clip(px, 0, W - 1)
-                py = np.clip(py, 0, H - 1)
-                pts.append([px, py])
-            pts = np.array(pts, dtype=np.int32)
-            cv2.fillPoly(mask, [pts], 1.0)
+            if mask.sum() >= min_area:
+                break
         
         image[mask > 0.5] = color
         masks.append(mask)
@@ -78,16 +96,20 @@ def generate_scene(H=128, W=128, num_objects=2, seed=None):
     return image, masks
 
 
-def generate_multi_view(H=128, W=128, num_objects=2, num_views=8, seed=None):
+def generate_multi_view(H=128, W=128, num_objects=2, num_views=8, seed=None,
+                        same_color=False):
     """
     生成多视角数据，通过随机仿射变换模拟相机运动。
-    
+
+    所有视角共享同一个基础场景，仅通过仿射变换产生视角差异。
+
     Args:
         H, W: 图像分辨率
         num_objects: 物体数量
         num_views: 视角数量
         seed: 随机种子
-    
+        same_color: 如果 True，所有物体使用相同颜色（EXT-4验证）
+
     Returns:
         images: (V, H, W, 3) float32, RGB in [0, 1]
         masks: (V, H, W, K) float32, K 个实例掩码
@@ -95,15 +117,16 @@ def generate_multi_view(H=128, W=128, num_objects=2, num_views=8, seed=None):
     """
     if seed is not None:
         np.random.seed(seed)
+
+    # 生成一个基础场景（所有视角共享）
+    base_image, base_masks = generate_scene(H, W, num_objects, seed=seed,
+                                             same_color=same_color)
     
     images = []
     all_masks = []
     transforms = []
     
     for v in range(num_views):
-        # 生成基础场景
-        image, masks_v = generate_scene(H, W, num_objects, seed=seed + v if seed is not None else None)
-        
         # 随机仿射变换（轻微旋转/缩放/平移）
         angle = np.random.uniform(-15, 15) * np.pi / 180.0
         scale = np.random.uniform(0.85, 1.15)
@@ -116,15 +139,15 @@ def generate_multi_view(H=128, W=128, num_objects=2, num_views=8, seed=None):
         ], dtype=np.float32)
         transforms.append(M)
         
-        # 对图像和每个掩码通道应用变换
-        image_v = cv2.warpAffine(image, M, (W, H), borderMode=cv2.BORDER_CONSTANT, borderValue=(0.9, 0.9, 0.9))
+        # 对基础场景应用变换
+        image_v = cv2.warpAffine(base_image, M, (W, H), borderMode=cv2.BORDER_CONSTANT, borderValue=(0.9, 0.9, 0.9))
         
-        masks_v_transformed = []
-        for k in range(masks_v.shape[-1]):
-            mask_k = cv2.warpAffine(masks_v[..., k], M, (W, H), borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            masks_v_transformed.append(mask_k)
+        masks_v = []
+        for k in range(base_masks.shape[-1]):
+            mask_k = cv2.warpAffine(base_masks[..., k], M, (W, H), borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            masks_v.append(mask_k)
         
-        masks_v = np.stack(masks_v_transformed, axis=-1)
+        masks_v = np.stack(masks_v, axis=-1)
         
         images.append(image_v)
         all_masks.append(masks_v)
