@@ -10,7 +10,7 @@ Atoms self-organize through:
 
 import torch
 import torch.nn.functional as F
-from src.losses.direct_cluster import compute_pairwise_geodesic_sq
+from src.losses.direct_cluster import compute_pairwise_midpoint_mahalanobis_sq
 
 
 def compute_geodesic_neighbors(mus, metric_field, k=5):
@@ -31,7 +31,7 @@ def compute_geodesic_neighbors(mus, metric_field, k=5):
         indices: (N, k) indices of top-k neighbors
     """
     with torch.no_grad():
-        D2 = compute_pairwise_geodesic_sq(mus, metric_field)  # (N, N)
+        D2 = compute_pairwise_midpoint_mahalanobis_sq(mus, metric_field)  # (N, N)
     D2_masked = D2 + torch.eye(D2.shape[0], device=D2.device) * 1e10  # exclude self
     _, indices = D2_masked.topk(k=k, dim=1, largest=False)  # (N, k)
 
@@ -105,8 +105,9 @@ def self_organization_loss(mus, states, metric_field, K=5):
     s_norm = F.normalize(states, dim=-1)
     S = s_norm @ s_norm.T  # (N, N), in [-1, 1]
 
-    # Geodesic distance (differentiable — gradients flow through D2)
-    D2 = compute_pairwise_geodesic_sq(mus, metric_field)
+    # Midpoint Mahalanobis distance (differentiable — gradients flow through D2)
+    # NOTE (EXT-2): This is a midpoint chord approximation, not a true geodesic.
+    D2 = compute_pairwise_midpoint_mahalanobis_sq(mus, metric_field)
 
     # ── Adaptive sigma: per-atom K-th neighbor distance ──
     # Use detached D2 for sigma computation so bandwidth selection
@@ -125,6 +126,59 @@ def self_organization_loss(mus, states, metric_field, K=5):
 
     # Loss: -S * W → similar states close in geodesic → low loss
     return -(S * W).sum() / (N * N)
+
+
+def state_contrastive_loss(states, geo_mask, temperature=0.1):
+    """
+    InfoNCE-style contrastive loss on atom states.
+
+    Forces geodesic neighbors (same object) to have similar states,
+    and non-neighbors (different objects) to have dissimilar states.
+
+    This is the critical loss that breaks state collapse:
+    without it, the decoder can map all states to the same color.
+    With it, states MUST differentiate to satisfy both:
+      - neighbor similarity (intra-cluster cohesion)
+      - non-neighbor dissimilarity (inter-cluster separation)
+
+    Correct InfoNCE formulation:
+      L_i = -log( sum_{j in pos(i)} exp(sim_ij) / sum_{k != i} exp(sim_ik) )
+
+    Args:
+        states: (N, D) atom states
+        geo_mask: (N, N) binary mask: 1 = geodesic neighbor, 0 = non-neighbor
+        temperature: softmax temperature (lower = sharper separation)
+
+    Returns:
+        loss: scalar
+    """
+    N = states.shape[0]
+    if N < 4:
+        return torch.tensor(0.0, device=states.device)
+
+    s_norm = F.normalize(states, dim=-1)  # (N, D)
+    sim = s_norm @ s_norm.T / temperature  # (N, N)
+
+    eye_mask = torch.eye(N, device=states.device)
+    pos_mask = geo_mask * (1 - eye_mask)
+
+    # Numerical stability: subtract max per row
+    sim_max = sim.max(dim=1, keepdim=True)[0].detach()
+    sim_stable = sim - sim_max
+
+    exp_sim = torch.exp(sim_stable)
+
+    # Positive: sum over neighbors
+    pos_sum = (exp_sim * pos_mask).sum(dim=1)  # (N,)
+
+    # Negative: sum over all others (excluding self)
+    neg_sum = (exp_sim * (1 - eye_mask)).sum(dim=1)  # (N,)
+
+    # InfoNCE: -log(pos / (pos + neg))
+    # But we want to push negatives apart, so standard form is:
+    # L = -log( pos / all ) where all = pos + neg
+    loss = -torch.log((pos_sum / neg_sum.clamp(min=1e-8)).clamp(min=1e-8))
+    return loss.mean()
 
 
 def masked_prediction_loss(mus, states, metric_field,
