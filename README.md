@@ -23,62 +23,115 @@ MetricAtom 是一个基于黎曼度量场和有界感知原子的三维场景理
 
 ## 数学框架
 
-### 1. 黎曼度量场
+> 2026-06-13 重构（分支 `feat/clustering-breakthrough`）。
+> 本节整合六公理体系、核心定理链与外部审计矛盾。
+> 导航：[docs/theory_index.md](docs/theory_index.md) 给出完整阅读路径、可信度评级（R/H/S）与依赖关系。
+
+### 0. 最小公理体系（全部 R 级 · 来源 theory_fracture_fixes.md §6.1）
+
+框架的最终数学基础由六条公理构成，全部为 R 级（严格证明，假设明确）：
+
+| 公理 | 内容 | 级别 | 来源 |
+|------|------|------|------|
+| **A1** | 状态传播收缩性：$\|\mathcal{T}_W(S) - \mathcal{T}_W(S')\| \leq (1 - \alpha\lambda_2)\|S - S'\|$ | **R** | theory_selforg 定理 1 |
+| **A2** | 掩码预测强制物体推理：$\mathcal{L}_{\text{predict}}$ 在度量场不编码物体边界时有非零下界 | **R** ⚠ | theory_selforg_2 命题 13（**受 EXT-4 质疑**） |
+| **A3** | 自组织力符号正确性：$\nabla_g \mathcal{L}_{\text{selforg}}$ 推同簇原子靠近、跨簇原子远离 | **R** | theory_selforg §2.2 |
+| **A4** | 均匀解不稳定性：$H_{ss}$ 在物体区分方向上有负特征值（鞍点） | **R** ⚠ | 定理 22（**自承证明含符号跳变**，详见原文） |
+| **A5** | 梯度局部性 + 度量场自修正性：$\partial\mathcal{L}_{\text{predict}}/\partial g(x)$ 仅在原子-像素中点附近非零；偏离最优的 $g$ 被梯度推回 | **R** | 引理 2 + 定理 17 |
+| **A6** | Bootstrap 收敛：重建驱动度量场在颜色边缘指数收敛到非零稳态 $\Delta g^* = \eta_{\text{recon}} G_{\text{edge}} / (\eta_s \lambda_2)$ | **R** | 命题 23 + 定理 20 |
+
+**整体严格率（自我审计）**：六公理 + 九条新 R 命题（引理 1–2、定理 17–22、命题 23）。理论陈述统计为 **22R(36%) · 27H(44%) · 12S(20%)**，废除 8 条信息瓶颈伪命题后修订为 14/53 = 26%。
+**外部审计重估**：[theory_defect_report_external_audit.md](docs/theory_defect_report_external_audit.md) 估计真实 R 率约 **18%**（口径差异详见 §3 主要矛盾）。
+
+### 1. 核心定理链（公理 → 聚类涌现）
+
+从公理到聚类涌现的逻辑链（来源 theory_index.md §2.2）：
+
+```
+A4 (均匀解不稳定) → SGD 必然离开均匀解 → 状态开始按物体分化
+        ↓
+A6 (Bootstrap) → 重建驱动在颜色边缘产生初始度量场结构
+        ↓
+A2 (掩码预测) → 预测误差迫使度量场不跨越物体边界
+        ↓
+A1 (状态收缩) → 物体内部状态通过消息传递坍缩 → 物体间通过度量场隔离
+        ↓
+A3 + A5 (自组织 + 自修正) → 度量场在边界处锐化 → 状态坍缩与边界形成正反馈
+        ↓
+聚类涌现（K 个簇）
+```
+
+**主线定理编号速查**：
+
+1. **状态动力学**：[theory_selforg.md](docs/theory_selforg.md) 定理 1–2 → 推论 1.1–1.2
+2. **涌现条件**：theory_selforg 定理 5（条件 C1+C2+C3）
+3. **Lyapunov 稳定性**：theory_selforg 命题 6–8
+4. **联合 Hessian / PL 条件**：[theory_selforg_2.md](docs/theory_selforg_2.md) 定理 8–9
+5. **解码器谱**：[theory_selforg_3.md](docs/theory_selforg_3.md) 定理 13 + 引理 16.1
+6. **残差解码器谱优化**：[theory_selforg_4.md](docs/theory_selforg_4.md) 定理 17–18
+7. **有限 N 分岔**：theory_selforg_4 定理 20
+8. **跨视角一致性**：theory_selforg_4 定理 23（β_c 降低 30%）
+
+### 2. 黎曼度量场参数化
 
 定义：每点 $x$ 赋予一个正定对称矩阵 $g(x) \in \mathrm{Sym}^+(d)$。
 
 **参数化方式（可切换）**：
-- **Cholesky**：$g = LL^\top + \epsilon I$（快速，但欧几里得SGD ≠ SPD流形测地下降）
-- **矩阵指数**：$g = \exp(H)$，$H$ 对称（严格SPD，切空间优化）
+- **Cholesky**：$g = LL^\top + \epsilon I$（快速；⚠ **EXT-1**：欧几里得 SGD ≠ SPD 流形测地下降）
+- **矩阵指数**：$g = \exp(H)$，$H$ 对称（严格 SPD，切空间优化 — 推荐替代）
 
-- **2D**：3 自由度/点
-- **3D**：6 自由度/点
+2D 为 3 自由度/点，3D 为 6 自由度/点。
 
-**距离度量**：使用**中点马氏距离**（midpoint Mahalanobis chord distance）作为测地距离的近似：
-$$d^2_{ij} \approx (\mu_i - \mu_j)^\top g\left(\frac{\mu_i + \mu_j}{2}\right) (\mu_i - \mu_j)$$
+**距离度量**：中点马氏距离（midpoint Mahalanobis chord distance）作为测地距离的近似：
+$$d^2_{ij} \approx (\mu_i - \mu_j)^\top g\!\left(\frac{\mu_i + \mu_j}{2}\right) (\mu_i - \mu_j)$$
 
-> ⚠️ 这不是严格的测地距离。在度量变化剧烈区域（如边界），误差可能显著。详见 `src/losses/direct_cluster.py` 中的 `compute_true_geodesic_sq_1d` 验证函数。
+> ⚠️ **EXT-2**：中点近似在强各向异性区误差可达 100%+，无理论界。代码 `src/losses/direct_cluster.py::compute_true_geodesic_sq_1d` 仅 1D 验证。
 
-度量场与**占位耦合损失**协同学边界：
-- 物体内部 $\mathrm{tr}(g) < 1$，背景 $\mathrm{tr}(g) > 9$
-- 度量场在物体边界处跳变 → 提供聚类边界的几何信号
+**占位耦合**：物体内部 $\mathrm{tr}(g) \u003c 1$，背景 $\mathrm{tr}(g) \u003e 9$。度量场在边界跳变 → 提供聚类边界的几何信号。
 
-### 2. 直接测地聚类损失 (Direct Cluster)
+### 3. 直接测地聚类损失 (Direct Cluster) [历史突破保留]
 
-用 Sinkhorn 可微软分配替代 InfoNCE，消除黎曼空间逻辑循环：
+用 Sinkhorn 可微软分配替代 InfoNCE：
+$$\mathcal{L}_{\text{direct}} = \sum_k \frac{P[:,k]^\top D_g^2\, P[:, k]}{(\text{cluster\_mass})^2}$$
 
-$$\mathcal{L}_{\text{direct}} = \sum_k \frac{P[:,k]^\top D_g^2\, P[:,k]}{(\text{cluster\_mass})^2}$$
+- Sinkhorn 软分配 $P$ 可微，梯度流连续
+- 度量场 $g$ 直接最小化簇内测地距离
+- 数值结果：DirectCluster 在 ε=0.05 下 ARI 0.440 → **0.755** → **0.931**
 
-- **Sinkhorn 软分配** $P$：基于特征-原型余弦相似度，可微，梯度流连续
-- 度量场 $g$ 直接最小化簇内测地距离，不再通过特征间接优化
-- 训练稳定性：InfoNCE 的"甜区宽度极窄"（$w_{\text{vol}} = 0.1 \pm 0.025$）已被 Direct Cluster 替代，后者在 ε=0.05 下 ARI=0.93
+⚠ **EXT-3**：Sinkhorn ε=0.05 处于收敛不稳定区；代码 `n_iters=50` 可能不足。P0：自适应 ε 或 ≥200 次迭代。
 
-### 3. Murmuration 动力学 [HISTORICAL]
+> **路线状态（2026-06-04 弃用）**：DirectCluster 6 条路线全失败（σ=0.39）；保留作为历史突破。当前主路线为自组织原子架构（公理 A1–A6）。详见 [postmortem_direct_cluster.md](docs/postmortem_direct_cluster.md)。
 
-> 2026-06-03: Murmuration 代码（murmuration.py, elliptic_curve.py）已随 ECO 路径移除。Lyapunov 稳定性分析（murmuration_dynamics.md）作为理论成果保留，数值验证已通过（S¹ 离散 Murmuration Lyapunov 单调递减）。
+### 4. 外部审计：未解决的 8 项主要矛盾（EXT-1–EXT-8）
+
+| # | 缺陷 | 级别 | 状态 / 优先级 |
+|---|---|---|---|
+| **EXT-1** | Cholesky + 欧氏 SGD ≠ SPD 流形优化 | 🔴 blocking | P1：矩阵指数 vs 自然梯度对比 |
+| **EXT-2** | 中点度量近似无测地距离误差界 | 🔴 blocking | P0：在解析度量场上量化 |
+| **EXT-3** | Sinkhorn ε=0.05 在不稳定区，迭代次数不足 | 🔴 blocking | P0：自适应 ε 或 ≥200 次迭代 |
+| EXT-4 | 掩码预测不必然强制物体推理 | 🟡 major | P1：同色多物体 ARI 验证 |
+| EXT-5 | Lojasiewicz θ 可能接近 1/2，收敛极慢 | 🟡 major | P2：建议定理 18–19 降级为 H |
+| EXT-6 | "零外部先验"声称不实 | 🟡 major | P0：README 删除该声称 |
+| EXT-7 | 3D 测地邻接稀疏性被严重低估 | 🟡 major | P1：3D 可行性验证 |
+| EXT-8 | 自组织力热力学类比缺乏严格性 | 🟢 minor | P2 |
+
+### 5. 历史路径（已弃用）
+
+- **Murmuration 动力学 [HISTORICAL]**：代码 2026-06-03 随 ECO 路径移除；Lyapunov 分析保留（[murmuration_dynamics.md](docs/murmuration_dynamics.md)）。
+- **ECO / 椭圆曲线 / j-不变量 [DEPRECATED]**：ARI 0.30 vs DirectCluster 0.93；j-空间聚类本质病态。
+- **InfoNCE + 特征扩散 [HISTORICAL]**：被 Direct Cluster 替代；测地高斯核 100/100 非 PSD（[numerical_verification.md](docs/numerical_verification.md)）。
 
 > 📐 **详细数学文档**
 >
-> 建议先读 [docs/theory_index.md](docs/theory_index.md) 获取完整导航图、阅读路径与可信度评级，再按主题深入以下文档。
+> 建议先读 [docs/theory_index.md](docs/theory_index.md) 获取完整导航图、阅读路径与可信度评级，再按路径深入：
 >
-> - [docs/framework_audit.md](docs/framework_audit.md)：**框架系统审计** — 34 项命题/实验/假设的数学严格性评估（17.6% 已证明，8 项阻塞级缺陷）
-> - [docs/gradient_flow_analysis.md](docs/gradient_flow_analysis.md)：Direct Cluster vs InfoNCE 梯度流分析（甜区宽度理论、Sinkhorn 最优 ε 推导、Phase 7 landscape 双稳态解释）
-> - [docs/convergence_rate_analysis.md](docs/convergence_rate_analysis.md)：收敛速率严格分析（Lipschitz 常数推导、O(1/t) 次线性收敛证明、PL 条件线性收敛、ε-条件数关系、vs InfoNCE 收敛对比）
-> - [docs/remaining_proofs.md](docs/remaining_proofs.md)：**三大遗留问题完整证明** — PL 条件严格证明（定理 1,2）、K > 2 簇泛化（命题 3,4）、ECO 协同收敛（命题 5,6,7）
-> - [docs/phase6a_eco_theory.md](docs/phase6a_eco_theory.md)：ECO 完整形式化（椭圆曲线群运算、j-不变量稳定性定理证明、Sinkhorn 兼容性定理、传感函数 φ、分岔检测、模空间优先级矩阵）
-> - [docs/math_analysis.md](docs/math_analysis.md)：3D 黎曼度量场的数学可行性分析（Cholesky 推广、测地截断 smoothstep 公式、InfoNCE 超参数学解释、占位耦合与位置正则的权重推导、3D Murmuration 接口）
-> - [docs/murmuration_dynamics.md](docs/murmuration_dynamics.md)：**Murmuration 动力学严格分析** — Lyapunov 函数存在性证明（V=T+U, dV/dt ≤ 0 当 η>β）、Hartman-Grobman 局部稳定性（Fourier 谱分析）、吸引域估计（能量水平集方法）、Cucker-Smale 联系、训练 Phase 对应
-> - [docs/theoretical_extensions.md](docs/theoretical_extensions.md)：**四大理论扩展** — Phase 2 最优切换控制（Pontryagin 视角 + 间隙条件）、K 自适应选择（Sinkhorn 有效秩 + Silhouette 扫描 + 特征谱间隙）、泛化误差界（PAC-Bayes + Rademacher 复杂度估计）、超参数敏感性（Hessian 谱分析 + ε 主导的谱分离器 + 阻尼 Lyapunov 阈值 + 随机矩阵视角）
-> - [docs/numerical_verification.md](docs/numerical_verification.md)：**数值验证报告** — Murmuration Lyapunov 离散验证（8/8 种子收敛，终态 V/V₀=0.047）、测地高斯核 PSD 验证（100/100 非 PSD，确认为缺陷）
-> - [docs/blocker_verification.md](docs/blocker_verification.md)：**阻塞级缺陷严格数学验证** — j-不变量梯度精确计算（|∇j|≈31000 在初始化点）、z-score 归一化矛盾（batch-dependent 身份）、Δ≠0 的理论不可保证性
-> - [docs/postmortem_direct_cluster.md](docs/postmortem_direct_cluster.md)：**DirectCluster 事后分析** — 6 条路线完整记录：三个致命假设被证伪（特征≠物体感知、测地≠聚类 teacher、种子敏感性 ≠ 初始化问题）
-> - [docs/atom_selforg_redesign.md](docs/atom_selforg_redesign.md)：**自组织原子系统重新设计** — 掩码多视图预测新任务、状态动力学（图注意力消息传递）、自组织力、涌现聚类
-> - [docs/theory_selforg.md](docs/theory_selforg.md)：**自组织原子理论基础** — 状态动力学收敛（收缩映射，几何速率）、涌现聚类 Landau 理论（序参量 + 自由能）、Lyapunov 稳定性（总损失 = Lyapunov 函数，均匀解不稳定）、信息论解释（信息瓶颈 → 聚类 = 最优压缩）、泛化误差界、7 条可检验数值预测
-> - [docs/theory_selforg_2.md](docs/theory_selforg_2.md)：**自组织理论深化 II** — 5 定理 + 4 命题 + 5 推论：掩码预测形式分析（命题 12,13）、联合 Hessian 谱分析与 PL 条件（定理 8,9）、状态动力学收敛加速（定理 10）、信息瓶颈 β_c 量化（定理 11, 命题 14,15）、自适应温度 τ 调度（命题 16）、6 条可检验预测
-> - [docs/theory_selforg_3.md](docs/theory_selforg_3.md)：**自组织理论深化 III** — 5 定理 + 7 命题 + 3 推论 + 1 引理：解码器 Jacobian 谱下界（定理 13, 引理 16.1）、多物体 β_c 定量预测（定理 14, 命题 16）、真实图像收缩性（定理 15, 命题 17）、自适应 τ PI 控制（命题 18）、多时间尺度奇异摄动（命题 19）、分岔理论深化（命题 20-22）、测地-状态对偶性（定理 16）、8 条可检验预测
-> - [docs/theory_selforg_4.md](docs/theory_selforg_4.md)：**自组织理论深化 IV** — 8 定理 + 10 命题 + 4 推论：残差解码器谱优化（定理 17,18, 命题 23）、自适应时间尺度分离（定理 19, 命题 24,25）、有限 N 分岔效应（定理 20, 命题 26, 推论 22.1）、双曲状态流形（定理 21,22, 命题 27）、跨视角一致性（定理 23, 命题 28,29）、非刚性形变（定理 24, 命题 30, 推论 23.1）、9 条可检验预测
-> - [docs/theory_audit_and_roadmap.md](docs/theory_audit_and_roadmap.md)：**理论审计与发展路线** — 61 条理论陈述的 R/H/S 严格性分级、4 条不可再简化数学公理、3 个关键断裂点、P0-P3 优化路线图
-> - [docs/theory_fracture_fixes.md](docs/theory_fracture_fixes.md)：**断裂点修复与理论重整** — 废除 8 条 IB 伪命题、新增 9 条 R 级严格命题（引理 1-2、定理 17-22、命题 23）、六公理完备体系（全部 R 级）、修订后 R22(36%)·H27(44%)·S12(20%)
+> - 路径 A（30 分钟）：[README §核心思想](#核心思想) → theory_index → [atom_selforg_redesign.md](docs/atom_selforg_redesign.md)
+> - 路径 B（系统学习）：theory_selforg → v2 → v3 → v4 → [theory_fracture_fixes.md](docs/theory_fracture_fixes.md)
+> - 路径 C（审计与可信度）：[theory_audit_and_roadmap.md](docs/theory_audit_and_roadmap.md) → theory_defect_report_external_audit → theory_fracture_fixes → [framework_audit.md](docs/framework_audit.md)
+> - 路径 D（实现）：atom_selforg_redesign → [neuroscience_informed_roadmap.md](docs/neuroscience_informed_roadmap.md) → [theoretical_extensions.md](docs/theoretical_extensions.md) → numerical_verification
+> - 路径 E（历史与失败）：[history.md](docs/history.md) → postmortem_direct_cluster → phase6a_eco_theory
+>
+> 完整文档列表与 R/H/S 评级见 [theory_index.md §1 文档地图](docs/theory_index.md#1-文档地图)。
 
 ---
 
