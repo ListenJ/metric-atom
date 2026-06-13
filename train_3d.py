@@ -140,7 +140,8 @@ def train_scene_3d(H=128, W=128, res_x=32, res_y=32, res_z=32,
                    phase2_start=1200, lr=1e-3, device='cuda',
                    output_dir='outputs/3d_128x128', bf16=False,
                    num_samples=128, seed_every=25, prune_every=None,
-                   render_chunk_size=4096):
+                   render_chunk_size=4096,
+                   parametrization='cholesky'):
     """
     3D 完整训练流程。
     
@@ -185,7 +186,8 @@ def train_scene_3d(H=128, W=128, res_x=32, res_y=32, res_z=32,
     
     # ── 初始化 3D 度量场和原子 ──
     print(f"[2/5] 初始化 3D 度量场 ({res_x}x{res_y}x{res_z}) + {num_atoms} 个原子...")
-    metric_field = MetricField3D(res_x, res_y, res_z, init_scale=1.0).to(device)
+    metric_field = MetricField3D(res_x, res_y, res_z, init_scale=1.0,
+                                  parametrization=parametrization).to(device)
     atoms = create_atoms_3d(num_atoms, device, seed=42, radius_min=0.15, radius_max=0.30)
     
     atom_params = [p for a in atoms for p in a.parameters()]
@@ -442,6 +444,9 @@ if __name__ == '__main__':
                         help='Output directory')
     parser.add_argument('--voxels', type=int, default=32,
                         help='MetricField3D voxel resolution (cubic)')
+    parser.add_argument('--parametrization', type=str, default='cholesky',
+                        choices=['cholesky', 'matrix_exp'],
+                        help="Metric field parametrization (matrix_exp is very slow in 3D)")
     args = parser.parse_args()
     
     H = W = args.resolution
@@ -475,4 +480,5 @@ if __name__ == '__main__':
         bf16=bf16_enabled,
         num_samples=args.samples,
         render_chunk_size=args.chunk_size,
+        parametrization=args.parametrization,
     )
