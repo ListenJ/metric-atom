@@ -24,7 +24,7 @@ class Atom2D(BaseAtom):
     距离计算基于局部度量场提供的马氏距离。
     """
     
-    def __init__(self, mu, radius, color, state_dim=16, eps=0.5):
+    def __init__(self, mu, radius, color, state_dim=16, feature_dim=None, eps=0.5):
         super().__init__()
         
         if mu.dim() != 1 or mu.shape[0] != 2:
@@ -41,7 +41,20 @@ class Atom2D(BaseAtom):
         self._state = nn.Parameter(torch.rand(state_dim, dtype=mu.dtype, device=mu.device))
         self._logit_eps = nn.Parameter(torch.logit(torch.tensor(eps, dtype=mu.dtype, device=mu.device)))
         self._state_dim = state_dim
+        # Backward-compatible feature vector; defaults to RGB color if not requested.
+        self._feature_dim = feature_dim if feature_dim is not None else (3 if state_dim == 3 else state_dim)
+        self._feature = nn.Parameter(torch.rand(self._feature_dim, dtype=mu.dtype, device=mu.device))
     
+    @property
+    def feature(self):
+        """Return the learned feature vector."""
+        return self._feature
+    
+    @property
+    def color(self):
+        """Return the explicit RGB color parameter (not the state-decoded color)."""
+        return self._color
+
     @property
     def position(self):
         return self._mu
@@ -102,10 +115,10 @@ class Atom2D(BaseAtom):
         """
         Return RGB color for rendering.
         
-        If state_dim == 3, state directly parametrizes RGB.
-        Otherwise, an external state_decoder must be provided to map state -> color.
+        If an external state_decoder is provided, decode the state to color.
+        Otherwise, use the explicit RGB color parameter for backward compatibility.
         """
         if state_decoder is not None:
             return torch.sigmoid(state_decoder(self._state))
-        # Clamp to valid RGB range
-        return torch.sigmoid(self._state)
+        # Use explicit color parameter when no decoder is provided.
+        return torch.sigmoid(self._color)

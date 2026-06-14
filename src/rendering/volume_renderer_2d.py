@@ -51,6 +51,11 @@ def volume_render_2d(rays_o, rays_d, atoms, metric_field, num_samples=256,
         colors_all = state_decoder(torch.stack([a.state for a in atoms]))  # (A, 3)
     else:
         colors_all = torch.stack([a.get_color() for a in atoms])  # (A, 3)
+        if colors_all.ndim == 2 and colors_all.shape[-1] != 3:
+            raise ValueError(
+                f"volume_render_2d expects atom colors of dimension 3, got shape {colors_all.shape}. "
+                "Pass state_decoder for state_dim != 3."
+            )
     eps_all = torch.stack([a.existence_prob for a in atoms])  # (A,)
 
     # 原子切片：确定批大小
@@ -101,7 +106,8 @@ def volume_render_2d(rays_o, rays_d, atoms, metric_field, num_samples=256,
         sigma += density_a.sum(dim=0).reshape(N_rays, num_samples)
 
         # 颜色贡献
-        color += (density_a.unsqueeze(-1) * colors.unsqueeze(1)).sum(dim=0).reshape(N_rays, num_samples, 3)
+        color_contrib = density_a.unsqueeze(-1) * colors.unsqueeze(1)  # (Na, N_points, 3)
+        color += color_contrib.sum(dim=0).reshape(N_rays, num_samples, 3)
 
         # 每原子贡献（可选）
         if return_per_atom:

@@ -49,7 +49,7 @@ class TestAtom2D:
         assert atom._mu.grad is not None, "Gradient must flow to mu"
         assert atom._log_r.grad is not None, "Gradient must flow to log_r"
         assert atom._color.grad is not None, "Gradient must flow to color"
-        assert atom._feature.grad is not None, "Gradient must flow to feature"
+        assert atom._state.grad is not None, "Gradient must flow to state"
         assert atom._logit_eps.grad is not None, "Gradient must flow to logit_eps"
     
     def test_smoothstep_continuity(self):
